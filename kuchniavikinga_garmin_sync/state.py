@@ -34,7 +34,7 @@ class SyncState:
             self._bucket = self._storage_client.bucket(bucket_name)
             self._blob = self._bucket.blob(self.STATE_FILE)
         else:
-            self._local_path = Path.home() / ".vikinga-garmin-sync" / self.STATE_FILE
+            self._local_path = Path.home() / ".kuchniavikinga-garmin-sync" / self.STATE_FILE
             self._local_path.parent.mkdir(parents=True, exist_ok=True)
 
     def load(self) -> None:
