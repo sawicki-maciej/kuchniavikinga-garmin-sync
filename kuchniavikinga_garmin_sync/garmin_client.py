@@ -28,7 +28,7 @@ class GarminConnectClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
-        await self.close()
+        pass
 
     async def authenticate(self) -> None:
         """Authenticate with Garmin Connect."""
@@ -39,7 +39,6 @@ class GarminConnectClient:
             self._auth.login(self.email, self.password)
 
             self._client = GarminClient(auth=self._auth)
-            await self._client.connect()
 
             self._authenticated = True
             logger.info("Garmin Connect authentication successful")
@@ -48,14 +47,6 @@ class GarminConnectClient:
             raise Exception(f"Garmin authentication failed: {e}") from e
         except GarminConnectError as e:
             raise Exception(f"Garmin connection failed: {e}") from e
-
-    async def close(self) -> None:
-        """Close the Garmin client."""
-        if self._client:
-            await self._client.close()
-            self._client = None
-        self._auth = None
-        self._authenticated = False
 
     async def log_meal(self, meal: DeliveredMeal) -> dict:
         """Log a meal to Garmin Connect nutrition.
