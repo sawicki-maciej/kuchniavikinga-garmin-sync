@@ -326,26 +326,61 @@ cmd_deploy() {
 # Run the job once (for testing)
 cmd_test() {
     local dry_run="false"
+    local sync_date=""
     
     # Parse flags
-    if [[ "${1:-}" == "--dry-run" ]]; then
-        dry_run="true"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)
+                dry_run="true"
+                shift
+                ;;
+            --date)
+                sync_date="$2"
+                shift 2
+                ;;
+            *)
+                log_error "Unknown flag: $1"
+                echo "Usage: $0 test [--dry-run] [--date YYYY-MM-DD]"
+                exit 1
+                ;;
+        esac
+    done
+    
+    if [[ "$dry_run" == "true" ]]; then
         log_info "Running job in DRY RUN mode (will not write to Garmin)"
     else
         log_info "Running job in LIVE mode"
+    fi
+    
+    if [[ -n "$sync_date" ]]; then
+        log_info "Syncing specific date: $sync_date"
     fi
     
     check_gcloud
     
     log_info "Executing Cloud Run Job: $JOB_NAME"
     
-    # Execute with environment override
-    local execution_name
+    # Build environment overrides
+    local env_vars=""
     if [[ "$dry_run" == "true" ]]; then
+        env_vars="DRY_RUN=true"
+    fi
+    if [[ -n "$sync_date" ]]; then
+        if [[ -n "$env_vars" ]]; then
+            env_vars="${env_vars},SYNC_DATE=${sync_date}"
+        else
+            env_vars="SYNC_DATE=${sync_date}"
+        fi
+    fi
+    
+    # Execute with environment overrides
+    local execution_name
+    if [[ -n "$env_vars" ]]; then
         execution_name=$(gcloud run jobs execute "$JOB_NAME" \
             --region="$REGION" \
             --project="$PROJECT_ID" \
-            --update-env-vars="DRY_RUN=true" \
+            --update-env-vars="$env_vars" \
             --format="value(metadata.name)" 2>&1 | tail -1)
     else
         execution_name=$(gcloud run jobs execute "$JOB_NAME" \
@@ -365,35 +400,41 @@ cmd_test() {
     # Wait for completion (timeout after 5 minutes)
     local timeout=300
     local elapsed=0
-    local status=""
-    local succeeded=""
     
     while [[ $elapsed -lt $timeout ]]; do
-        status=$(gcloud run jobs executions describe "$execution_name" \
+        # Get the full execution status
+        local exec_info
+        exec_info=$(gcloud run jobs executions describe "$execution_name" \
             --region="$REGION" \
             --project="$PROJECT_ID" \
-            --format="value(status.conditions[0].type)" 2>/dev/null || echo "")
+            --format="json" 2>/dev/null || echo "{}")
         
-        succeeded=$(gcloud run jobs executions describe "$execution_name" \
-            --region="$REGION" \
-            --project="$PROJECT_ID" \
-            --format="value(status.succeededCount)" 2>/dev/null || echo "0")
+        # Check completion status
+        local completed
+        completed=$(echo "$exec_info" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status', {}).get('completionTime', ''))" 2>/dev/null || echo "")
         
-        if [[ "$status" == "Completed" ]]; then
+        if [[ -n "$completed" ]]; then
+            # Job has completed, check the result
+            local succeeded
+            succeeded=$(echo "$exec_info" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status', {}).get('succeededCount', 0))" 2>/dev/null || echo "0")
+            
+            local failed
+            failed=$(echo "$exec_info" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status', {}).get('failedCount', 0))" 2>/dev/null || echo "0")
+            
             if [[ "$succeeded" == "1" ]]; then
                 log_info "✓ Job completed successfully"
                 break
+            elif [[ "$failed" == "1" ]]; then
+                log_error "✗ Job execution failed"
+                log_info "Fetching logs..."
+                cmd_logs
+                exit 1
             else
-                log_error "✗ Job execution failed (exit code non-zero)"
+                log_error "✗ Job completed with unexpected status (succeeded=$succeeded, failed=$failed)"
                 log_info "Fetching logs..."
                 cmd_logs
                 exit 1
             fi
-        elif [[ "$status" == "Failed" ]]; then
-            log_error "✗ Job execution failed"
-            log_info "Fetching logs..."
-            cmd_logs
-            exit 1
         fi
         
         sleep 5

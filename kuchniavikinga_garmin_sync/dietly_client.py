@@ -63,6 +63,17 @@ class DietlyClient:
         self.dump_raw = dump_raw
         self._session: AsyncSession | None = None
         self._authenticated = False
+    
+    def _masked_email(self) -> str:
+        """Return masked email for logging."""
+        if "@" in self.email:
+            local, domain = self.email.split("@", 1)
+            if len(local) <= 2:
+                masked_local = "*" * len(local)
+            else:
+                masked_local = local[0] + "*" * (len(local) - 2) + local[-1]
+            return f"{masked_local}@{domain}"
+        return "***"
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -115,7 +126,7 @@ class DietlyClient:
                 "password": self.password,
             })
 
-            logger.info("Authenticating to Kuchnia Vikinga panel as %s", self.email)
+            logger.info("Authenticating to Kuchnia Vikinga panel as %s", self._masked_email())
             resp = await self._session.post(
                 login_url,
                 data=login_data,

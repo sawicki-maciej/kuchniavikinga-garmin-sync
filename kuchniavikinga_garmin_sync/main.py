@@ -44,6 +44,18 @@ async def main() -> int:
         days_back = int(get_env_var("SYNC_DAYS_BACK", required=False) or "1")
         dry_run = get_env_var("DRY_RUN", required=False) == "true"
         dump_raw = get_env_var("DUMP_RAW", required=False) == "true"
+        
+        # Parse SYNC_DATE if provided (format: YYYY-MM-DD)
+        sync_date = None
+        sync_date_str = get_env_var("SYNC_DATE", required=False)
+        if sync_date_str:
+            from datetime import datetime
+            try:
+                sync_date = datetime.strptime(sync_date_str, "%Y-%m-%d").date()
+                logger.info("SYNC_DATE specified: %s", sync_date)
+            except ValueError as e:
+                logger.error("Invalid SYNC_DATE format (expected YYYY-MM-DD): %s", e)
+                return 1
 
         # Create and run sync
         sync = VikingaGarminSync(
@@ -57,7 +69,7 @@ async def main() -> int:
             dump_raw=dump_raw,
         )
 
-        result = await sync.run()
+        result = await sync.run(sync_date=sync_date)
 
         # Log results
         logger.info("Sync results: %s", result)

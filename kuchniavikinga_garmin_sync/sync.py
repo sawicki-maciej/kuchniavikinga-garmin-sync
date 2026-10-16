@@ -48,26 +48,36 @@ class VikingaGarminSync:
 
         self.state = SyncState(bucket_name=state_bucket)
 
-    async def run(self) -> dict:
+    async def run(self, sync_date: date | None = None) -> dict:
         """Run the sync operation.
+
+        Args:
+            sync_date: Specific date to sync (overrides days_back). If None, syncs yesterday.
 
         Returns:
             Dict with sync statistics
         """
         logger.info(
-            "Starting Vikinga → Garmin sync (days_back=%d, dry_run=%s)",
+            "Starting Vikinga → Garmin sync (days_back=%d, dry_run=%s, sync_date=%s)",
             self.days_back,
             self.dry_run,
+            sync_date or "default",
         )
 
         # Load sync state
         self.state.load()
 
         # Calculate date range
-        end_date = date.today() - timedelta(days=1)  # Yesterday
-        start_date = end_date - timedelta(days=self.days_back - 1)
-
-        logger.info("Syncing meals from %s to %s", start_date, end_date)
+        if sync_date:
+            # Sync specific date only
+            start_date = sync_date
+            end_date = sync_date
+            logger.info("Syncing meals for specific date: %s", sync_date)
+        else:
+            # Default: sync yesterday (or days_back window)
+            end_date = date.today() - timedelta(days=1)  # Yesterday
+            start_date = end_date - timedelta(days=self.days_back - 1)
+            logger.info("Syncing meals from %s to %s", start_date, end_date)
 
         # Fetch meals from Kuchnia Vikinga
         async with DietlyClient(
