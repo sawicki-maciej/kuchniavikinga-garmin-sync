@@ -398,6 +398,13 @@ class DietlyClient:
                     # Extract nutrition info
                     nutrition_data = meal.get("nutrition", {})
                     
+                    # Try multiple field names for carbohydrates (API may use different names)
+                    carbs = (
+                        self._safe_float(nutrition_data.get("carbohydrates")) or
+                        self._safe_float(nutrition_data.get("carbs")) or
+                        self._safe_float(nutrition_data.get("wegle"))  # Polish for carbs
+                    )
+                    
                     delivered_meal = DeliveredMeal(
                         delivery_date=delivery_date,
                         meal_name=meal.get("mealName", "Unknown"),
@@ -405,7 +412,7 @@ class DietlyClient:
                         nutrition=NutritionInfo(
                             calories=float(nutrition_data.get("calories", 0) or 0),
                             protein=self._safe_float(nutrition_data.get("protein")),
-                            carbs=self._safe_float(nutrition_data.get("carbs")),
+                            carbs=carbs,
                             fat=self._safe_float(nutrition_data.get("fat")),
                         ),
                         delivery_id=delivery_id,

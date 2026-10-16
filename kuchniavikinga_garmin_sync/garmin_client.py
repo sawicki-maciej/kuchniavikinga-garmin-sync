@@ -91,9 +91,9 @@ class GarminConnectClient:
             
             logger.info("Session loaded successfully")
             
-            # Try to refresh session if needed
+            # Try to refresh session if needed (refresh_session is async in ha-garmin)
             try:
-                refreshed = self._auth.refresh_session()
+                refreshed = await self._auth.refresh_session()
                 if refreshed:
                     logger.info("Session tokens refreshed")
                     self._tokens_changed = True
