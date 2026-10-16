@@ -37,10 +37,14 @@ class DeliveredMeal:
 
 
 class DietlyClient:
-    """Client for Dietly API (Kuchnia Vikinga backend)."""
+    """Client for Kuchnia Vikinga customer panel API.
+    
+    Based on JS bundle analysis of panel.kuchniavikinga.pl.
+    The panel is Dietly-powered white-label platform hosted on Heroku behind Cloudflare.
+    """
 
-    BASE_URL = "https://dietly.pl/api"
-    PANEL_BASE_URL = "https://panel.dietly.pl/api"
+    # Base URL from JS bundle: baseUrl: '/api' relative to panel.kuchniavikinga.pl
+    BASE_URL = "https://panel.kuchniavikinga.pl/api"
     COMPANY_ID = "kuchniavikinga"
 
     def __init__(self, email: str, password: str):
@@ -59,31 +63,35 @@ class DietlyClient:
         await self.close()
 
     async def authenticate(self) -> None:
-        """Authenticate with Dietly and establish session."""
+        """Authenticate with Kuchnia Vikinga customer panel.
+        
+        Based on JS bundle analysis: POST /api/auth/login
+        Uses curl_cffi with browser impersonation to handle Cloudflare protection.
+        """
         try:
             if self._session is None:
-                # Use curl_cffi with browser impersonation to bypass Cloudflare protection
+                # Use curl_cffi with browser impersonation
                 self._session = AsyncSession(impersonate="chrome120")
 
-            # First, visit the main page to establish cookies
+            # Visit login page first to establish session/cookies
             logger.info("Initializing session...")
-            await self._session.get("https://panel.dietly.pl/")
+            await self._session.get("https://panel.kuchniavikinga.pl/logowanie")
 
-            # Login via panel.dietly.pl with JSON payload
-            login_url = f"{self.PANEL_BASE_URL}/auth/login"
+            # Login endpoint from JS: baseUrl + 'auth/login'
+            login_url = f"{self.BASE_URL}/auth/login"
             payload = {
                 "username": self.email,
                 "password": self.password,
             }
 
-            logger.info("Authenticating to Dietly as %s", self.email)
+            logger.info("Authenticating to Kuchnia Vikinga panel as %s", self.email)
             resp = await self._session.post(
                 login_url,
                 json=payload,
                 headers={
                     "Content-Type": "application/json",
-                    "Origin": "https://panel.dietly.pl",
-                    "Referer": "https://panel.dietly.pl/",
+                    "Origin": "https://panel.kuchniavikinga.pl",
+                    "Referer": "https://panel.kuchniavikinga.pl/logowanie",
                     "Accept": "application/json",
                 },
             )
@@ -93,21 +101,19 @@ class DietlyClient:
                 # Clean up session on auth failure
                 await self.close()
                 raise Exception(
-                    f"Dietly login failed: HTTP {resp.status_code} - {error_text}"
+                    f"Kuchnia Vikinga login failed: HTTP {resp.status_code} - {error_text}"
                 )
 
-            # Verify authentication
+            # Verify authentication by fetching profile
+            # Endpoint from JS: 'profile'
             profile_url = f"{self.BASE_URL}/profile"
-            resp = await self._session.get(
-                profile_url,
-                headers=self._get_headers(),
-            )
+            resp = await self._session.get(profile_url)
 
             if resp.status_code != 200:
                 # Clean up session on verification failure
                 await self.close()
                 raise Exception(
-                    f"Dietly authentication verification failed: HTTP {resp.status_code}"
+                    f"Profile fetch failed: HTTP {resp.status_code}"
                 )
 
             profile = resp.json()
@@ -128,20 +134,25 @@ class DietlyClient:
         self._authenticated = False
 
     def _get_headers(self) -> dict[str, str]:
-        """Get headers required for Dietly API calls."""
+        """Get headers for API calls.
+        
+        Based on panel behavior - minimal headers needed after authentication.
+        """
         return {
-            "accept": "application/json",
-            "company-id": self.COMPANY_ID,
-            "x-launcher-type": "BROWSER_DIETLY",
+            "Accept": "application/json",
         }
 
     async def get_active_orders(self) -> list[dict[str, Any]]:
-        """Fetch all active orders."""
+        """Fetch all active orders.
+        
+        Endpoint from JS: 'company/customer/order/all'
+        """
         if not self._authenticated or not self._session:
             raise Exception("Not authenticated - call authenticate() first")
 
-        url = f"{self.BASE_URL}/profile/profile-order/all?page=0"
-        logger.debug("Fetching active orders from %s", url)
+        # Endpoint from JS bundle analysis
+        url = f"{self.BASE_URL}/company/customer/order/all"
+        logger.debug("Fetching orders from %s", url)
 
         resp = await self._session.get(url, headers=self._get_headers())
 
@@ -149,19 +160,33 @@ class DietlyClient:
             raise Exception(f"Failed to fetch orders: HTTP {resp.status_code}")
 
         data = resp.json()
-        orders = [
-            order
-            for order in data.get("content", [])
-            if order.get("status") == "ACTIVE"
-        ]
+        
+        # Filter for active orders - structure needs verification with real data
+        orders = []
+        if isinstance(data, list):
+            orders = [order for order in data if order.get("status") == "ACTIVE"]
+        elif isinstance(data, dict) and "content" in data:
+            orders = [
+                order
+                for order in data.get("content", [])
+                if order.get("status") == "ACTIVE"
+            ]
+        else:
+            # If it's a different structure, return all and let caller filter
+            orders = [data] if isinstance(data, dict) else []
+            
         logger.info("Found %d active orders", len(orders))
         return orders
 
     async def get_order_deliveries(self, order_id: int) -> list[dict[str, Any]]:
-        """Fetch deliveries for an order."""
+        """Fetch deliveries for an order.
+        
+        Endpoint from JS: 'company/customer/order/${orderId}'
+        """
         if not self._authenticated or not self._session:
             raise Exception("Not authenticated")
 
+        # Endpoint from JS bundle analysis
         url = f"{self.BASE_URL}/company/customer/order/{order_id}"
         logger.debug("Fetching deliveries for order %d", order_id)
 
@@ -180,10 +205,14 @@ class DietlyClient:
     async def get_delivery_meals(
         self, delivery_id: int
     ) -> list[dict[str, Any]]:
-        """Fetch meal details for a delivery."""
+        """Fetch meal details for a delivery.
+        
+        Endpoint from JS: 'company/general/menus/delivery/${deliveryId}/new'
+        """
         if not self._authenticated or not self._session:
             raise Exception("Not authenticated")
 
+        # Endpoint from JS bundle analysis
         url = f"{self.BASE_URL}/company/general/menus/delivery/{delivery_id}/new"
         logger.debug("Fetching meals for delivery %d", delivery_id)
 
