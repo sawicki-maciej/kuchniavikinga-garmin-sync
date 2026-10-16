@@ -25,7 +25,7 @@ IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 # Secret names (must match existing secrets exactly)
 SECRET_VIKINGA_EMAIL="kuchniavikinga-garmin-sync-vikinga-email"
 SECRET_VIKINGA_PASSWORD="kuchniavikinga-garmin-sync-vikinga-password"
-GARMIN_TOKEN_FILE=".garmin_tokens.json"
+SECRET_GARMIN_TOKENS="kuchniavikinga-garmin-sync-garmin-tokens"
 
 # Colors for output
 RED='\033[0;31m'
@@ -146,11 +146,12 @@ create_service_account() {
 }
 
 # Grant IAM permissions
+# Grant IAM permissions
 grant_permissions() {
     log_info "Granting IAM permissions..."
     
-    # Grant storage.objectUser on state bucket (for state AND tokens)
-    log_info "  Granting storage.objectUser on bucket (for state + tokens)..."
+    # Grant storage.objectUser on state bucket
+    log_info "  Granting storage.objectUser on bucket..."
     gsutil iam ch "serviceAccount:${SERVICE_ACCOUNT}:objectUser" "gs://${STATE_BUCKET}" 2>/dev/null || true
     
     # Grant secretAccessor on credential secrets
@@ -169,6 +170,23 @@ grant_permissions() {
             >/dev/null 2>&1 || true
     done
     
+    # Grant secretAccessor and secretVersionAdder on Garmin tokens secret
+    log_info "  Granting secretAccessor on $SECRET_GARMIN_TOKENS..."
+    gcloud secrets add-iam-policy-binding "$SECRET_GARMIN_TOKENS" \
+        --member="serviceAccount:${SERVICE_ACCOUNT}" \
+        --role="roles/secretmanager.secretAccessor" \
+        --project="$PROJECT_ID" \
+        --condition=None \
+        >/dev/null 2>&1 || true
+    
+    log_info "  Granting secretVersionAdder on $SECRET_GARMIN_TOKENS (for token refresh)..."
+    gcloud secrets add-iam-policy-binding "$SECRET_GARMIN_TOKENS" \
+        --member="serviceAccount:${SERVICE_ACCOUNT}" \
+        --role="roles/secretmanager.secretVersionAdder" \
+        --project="$PROJECT_ID" \
+        --condition=None \
+        >/dev/null 2>&1 || true
+    
     # Grant run.invoker for Cloud Scheduler
     log_info "  Ensuring service account has run.invoker role..."
     gcloud projects add-iam-policy-binding "$PROJECT_ID" \
@@ -179,6 +197,7 @@ grant_permissions() {
     
     log_info "  ✓ Permissions granted"
 }
+
 
 # Build and push container image
 build_image() {
@@ -200,11 +219,10 @@ build_image() {
 deploy_job() {
     log_info "Deploying Cloud Run Job..."
     
+    # Only mount secrets that are actually used
     local secret_mounts=(
         "VIKINGA_EMAIL=${SECRET_VIKINGA_EMAIL}:latest"
         "VIKINGA_PASSWORD=${SECRET_VIKINGA_PASSWORD}:latest"
-        "GARMIN_EMAIL=${SECRET_GARMIN_EMAIL}:latest"
-        "GARMIN_PASSWORD=${SECRET_GARMIN_PASSWORD}:latest"
     )
     
     local secret_args=""
@@ -479,16 +497,15 @@ cmd_garmin_login() {
     fi
     
     log_info "========================================================"
-    log_info "Garmin Token Bootstrap (like withings-sync)"
+    log_info "Garmin Token Bootstrap"
     log_info "========================================================"
     log_info ""
     log_info "This command must be run from a residential IP (your Mac)."
     log_info "It will:"
     log_info "  1. Prompt for Garmin email/password"
     log_info "  2. Handle MFA interactively"
-    log_info "  3. Save tokens locally"
-    log_info "  4. Upload to gs://${STATE_BUCKET}/${GARMIN_TOKEN_FILE}"
-    log_info "  5. Delete local file"
+    log_info "  3. Add tokens to Secret Manager"
+    log_info "  4. Clean up old GCS token file if it exists"
     log_info ""
     log_info "This avoids datacenter IP blocks and CAPTCHA on Cloud Run."
     log_info ""
@@ -501,14 +518,16 @@ cmd_garmin_login() {
     log_info "Running Garmin authentication bootstrap with uv..."
     cd "$repo_root"
     
-    GCS_BUCKET="$STATE_BUCKET" uv run --project "$repo_root" python -m kuchniavikinga_garmin_sync.garmin_bootstrap
+    SECRET_NAME="$SECRET_GARMIN_TOKENS" PROJECT_ID="$PROJECT_ID" STATE_BUCKET="$STATE_BUCKET" \
+        uv run --project "$repo_root" python -m kuchniavikinga_garmin_sync.garmin_bootstrap
     
-    if [[ $? -eq 0 ]]; then
+    local exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
         log_info ""
-        log_info "✓ Garmin tokens successfully uploaded to GCS"
+        log_info "✓ Garmin tokens successfully stored in Secret Manager"
         log_info ""
     else
-        log_error "Bootstrap failed"
+        log_error "Bootstrap failed with exit code $exit_code"
         exit 1
     fi
 }

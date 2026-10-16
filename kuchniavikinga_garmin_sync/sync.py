@@ -129,8 +129,8 @@ class VikingaGarminSync:
                 )
             synced_count = len(new_meals)
         else:
-            # Use token-based auth from GCS
-            async with GarminConnectClient(state_bucket=self.state_bucket) as garmin:
+            # Use token-based auth from Secret Manager
+            async with GarminConnectClient() as garmin:
                 for meal in new_meals:
                     try:
                         await garmin.log_meal(meal)
