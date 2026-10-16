@@ -151,6 +151,26 @@ def main() -> None:
         logger.error("SECRET_NAME and PROJECT_ID environment variables required")
         sys.exit(1)
     
+    # Check if secret already exists with versions
+    exists, has_versions = check_secret_exists(secret_name, project_id)
+    
+    if exists and has_versions:
+        logger.info("")
+        logger.warning("Secret %s already exists with valid tokens.", secret_name)
+        logger.warning("The Cloud Run job can already authenticate with the existing tokens.")
+        logger.info("")
+        response = input("Do you want to generate new tokens and add a new version? [y/N]: ").strip().lower()
+        
+        if response not in ('y', 'yes'):
+            logger.info("")
+            logger.info("Aborted. Existing tokens remain unchanged.")
+            logger.info("")
+            sys.exit(0)
+        
+        logger.info("")
+        logger.info("Proceeding to generate new tokens...")
+        logger.info("")
+    
     # Prompt for credentials
     email = input("Garmin email: ").strip()
     if not email:
