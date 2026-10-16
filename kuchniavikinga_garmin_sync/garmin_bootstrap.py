@@ -31,15 +31,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_secret_if_missing(secret_name: str, project_id: str) -> None:
-    """Create secret if it doesn't exist."""
+def check_secret_exists(secret_name: str, project_id: str) -> tuple[bool, bool]:
+    """Check if secret exists and has versions.
+    
+    Returns:
+        (secret_exists, has_versions)
+    """
     result = subprocess.run(
         ["gcloud", "secrets", "describe", secret_name, f"--project={project_id}"],
         capture_output=True,
         text=True,
     )
     
-    if result.returncode == 0:
+    if result.returncode != 0:
+        return (False, False)
+    
+    # Check if it has versions
+    versions_result = subprocess.run(
+        ["gcloud", "secrets", "versions", "list", secret_name, 
+         f"--project={project_id}", "--limit=1"],
+        capture_output=True,
+        text=True,
+    )
+    
+    has_versions = versions_result.returncode == 0 and len(versions_result.stdout.strip().split('\n')) > 1
+    
+    return (True, has_versions)
+
+
+def create_secret_if_missing(secret_name: str, project_id: str) -> None:
+    """Create secret if it doesn't exist."""
+    exists, _ = check_secret_exists(secret_name, project_id)
+    
+    if exists:
         logger.debug("Secret %s already exists", secret_name)
         return
     
