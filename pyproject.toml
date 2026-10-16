@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kuchniavikinga-garmin-sync"
+version = "0.1.0"
+description = "Sync Kuchnia Vikinga meal deliveries to Garmin Connect nutrition logging"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    {name = "xd.ventures", email = "maciej@sawicki.us"},
+]
+dependencies = [
+    "ha-garmin>=0.1.52",
+    "curl-cffi>=0.7.0",
+    "google-cloud-storage>=2.10.0",
+    "google-cloud-secret-manager>=2.16.0",
+    "python-dateutil>=2.8.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-mock>=3.11.0",
+    "aioresponses>=0.7.4",
+    "black>=23.7.0",
+    "ruff>=0.0.285",
+    "mypy>=1.5.0",
+]
+
+[project.scripts]
+kuchniavikinga-garmin-sync = "kuchniavikinga_garmin_sync.main:run"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.setuptools.packages.find]
+include = ["kuchniavikinga_garmin_sync*"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
