@@ -340,10 +340,20 @@ class DietlyClient:
     async def get_delivered_meals(
         self, start_date: date, end_date: date
     ) -> list[DeliveredMeal]:
-        """Fetch all delivered meals in the date range."""
+        """Fetch all delivered meals in the date range.
+        
+        Uses Europe/Warsaw timezone to determine "today" for delivery filtering.
+        Skips future deliveries and deleted items.
+        """
         # Get active order IDs first
         order_ids = await self.get_active_order_ids()
         delivered_meals: list[DeliveredMeal] = []
+        
+        # Get "today" in Europe/Warsaw timezone
+        from datetime import datetime as dt
+        from zoneinfo import ZoneInfo
+        warsaw_tz = ZoneInfo("Europe/Warsaw")
+        today_warsaw = dt.now(warsaw_tz).date()
 
         for order_id in order_ids:
             logger.debug("Processing order %d", order_id)
@@ -351,6 +361,11 @@ class DietlyClient:
             deliveries = await self.get_order_deliveries(order_id)
 
             for delivery in deliveries:
+                # Skip deleted deliveries
+                if delivery.get("deleted"):
+                    logger.debug("Skipping deleted delivery %s", delivery.get("deliveryId"))
+                    continue
+                
                 delivery_date_str = delivery.get("date")
                 if not delivery_date_str:
                     continue
@@ -361,20 +376,25 @@ class DietlyClient:
                 if not (start_date <= delivery_date <= end_date):
                     continue
 
-                # Check if delivered (status should be past delivery)
-                # In Dietly, delivered meals have certain status flags
-                # For safety, we sync meals from yesterday or earlier
-                if delivery_date >= date.today():
+                # Skip future deliveries only (today is OK)
+                if delivery_date > today_warsaw:
                     logger.debug(
-                        "Skipping future delivery %s (not yet delivered)",
+                        "Skipping future delivery %s (today is %s in Europe/Warsaw)",
                         delivery_date,
+                        today_warsaw,
                     )
                     continue
 
                 delivery_id = delivery["deliveryId"]
                 meals = await self.get_delivery_meals(delivery_id)
 
+                meal_count = 0
                 for meal in meals:
+                    # Skip deleted meals
+                    if meal.get("deleted"):
+                        logger.debug("Skipping deleted meal %s", meal.get("deliveryMealId"))
+                        continue
+                    
                     # Extract nutrition info
                     nutrition_data = meal.get("nutrition", {})
                     
@@ -392,9 +412,10 @@ class DietlyClient:
                         meal_id=meal.get("deliveryMealId", 0),
                     )
                     delivered_meals.append(delivered_meal)
+                    meal_count += 1
 
                 logger.info(
-                    "Delivery %s: found %d meals", delivery_date, len(meals)
+                    "Delivery %s: found %d meals", delivery_date, meal_count
                 )
 
         logger.info(
