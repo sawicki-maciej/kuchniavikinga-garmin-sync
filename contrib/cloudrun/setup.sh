@@ -102,11 +102,10 @@ create_bucket() {
 verify_secrets() {
     log_info "Verifying required secrets exist..."
     
+    # Only verify the Vikinga credentials (Garmin tokens are created by bootstrap)
     local secrets=(
         "$SECRET_VIKINGA_EMAIL"
         "$SECRET_VIKINGA_PASSWORD"
-        "$SECRET_GARMIN_EMAIL"
-        "$SECRET_GARMIN_PASSWORD"
     )
     
     local missing_secrets=()
@@ -128,6 +127,9 @@ verify_secrets() {
         done
         exit 1
     fi
+    
+    # Note: Garmin tokens secret is created by ./setup.sh garmin-login
+    log_info "  Note: Garmin tokens ($SECRET_GARMIN_TOKENS) will be created by './setup.sh garmin-login'"
 }
 
 # Create service account
