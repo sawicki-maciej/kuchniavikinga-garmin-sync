@@ -405,6 +405,14 @@ class DietlyClient:
                         self._safe_float(nutrition_data.get("wegle"))  # Polish for carbs
                     )
                     
+                    # Warn if carbs are missing so we can identify the correct field name
+                    if not carbs and nutrition_data:
+                        logger.warning(
+                            "Carbs missing for meal %s. Available nutrition keys: %s",
+                            meal.get("menuMealName", "Unknown"),
+                            list(nutrition_data.keys())
+                        )
+                    
                     delivered_meal = DeliveredMeal(
                         delivery_date=delivery_date,
                         meal_name=meal.get("mealName", "Unknown"),
