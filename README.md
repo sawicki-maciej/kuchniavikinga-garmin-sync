@@ -1,0 +1,1 @@
+# kuchniavikinga-garmin-sync
