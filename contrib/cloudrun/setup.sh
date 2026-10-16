@@ -471,6 +471,13 @@ cmd_logs() {
 cmd_garmin_login() {
     check_gcloud
     
+    # Check if uv is available
+    if ! command -v uv &> /dev/null; then
+        log_error "uv not found. Please install it:"
+        log_error "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
+    fi
+    
     log_info "========================================================"
     log_info "Garmin Token Bootstrap (like withings-sync)"
     log_info "========================================================"
@@ -479,45 +486,31 @@ cmd_garmin_login() {
     log_info "It will:"
     log_info "  1. Prompt for Garmin email/password"
     log_info "  2. Handle MFA interactively"
-    log_info "  3. Save tokens to ~/.garmin_tokens.json"
-    log_info "  4. Show you the gsutil command to upload it"
+    log_info "  3. Save tokens locally"
+    log_info "  4. Upload to gs://${STATE_BUCKET}/${GARMIN_TOKEN_FILE}"
+    log_info "  5. Delete local file"
     log_info ""
     log_info "This avoids datacenter IP blocks and CAPTCHA on Cloud Run."
     log_info ""
     
-    # Check if Python and dependencies are available
-    if ! command -v python3 &> /dev/null; then
-        log_error "python3 not found. Please install Python 3.11+"
-        exit 1
-    fi
-    
-    # Install package in development mode if needed
+    # Get repo root
     local repo_root
     repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
     
-    log_info "Installing package dependencies..."
+    # Run the bootstrap script with uv
+    log_info "Running Garmin authentication bootstrap with uv..."
     cd "$repo_root"
-    python3 -m pip install -q -e . || {
-        log_error "Failed to install package dependencies"
+    
+    GCS_BUCKET="$STATE_BUCKET" uv run --project "$repo_root" python -m kuchniavikinga_garmin_sync.garmin_bootstrap
+    
+    if [[ $? -eq 0 ]]; then
+        log_info ""
+        log_info "✓ Garmin tokens successfully uploaded to GCS"
+        log_info ""
+    else
+        log_error "Bootstrap failed"
         exit 1
-    }
-    
-    # Run the bootstrap script
-    log_info "Running Garmin authentication bootstrap..."
-    python3 -m kuchniavikinga_garmin_sync.garmin_bootstrap
-    
-    # Show upload command
-    log_info ""
-    log_info "========================================================"
-    log_info "Next Step: Upload to GCS"
-    log_info "========================================================"
-    log_info ""
-    log_info "Run this command to upload the tokens to GCS:"
-    log_info ""
-    log_info "  gsutil cp ~/.garmin_tokens.json gs://${STATE_BUCKET}/${GARMIN_TOKEN_FILE}"
-    log_info ""
-    log_info "The Cloud Run job will download and auto-refresh these tokens."
-    log_info ""
+    fi
 }
 
 # Destroy all infrastructure

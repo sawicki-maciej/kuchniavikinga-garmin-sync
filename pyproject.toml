@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Sync Kuchnia Vikinga meal deliveries to Garmin Connect nutrition logging"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "xd.ventures", email = "maciej@sawicki.us"},
 ]
@@ -46,6 +46,9 @@ line-length = 100
 target-version = "py311"
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
+
+[tool.setuptools.packages.find]
+include = ["kuchniavikinga_garmin_sync*"]
 
 [tool.mypy]
 python_version = "3.11"
