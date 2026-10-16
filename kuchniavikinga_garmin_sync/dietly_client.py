@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-import aiohttp
+from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class DietlyClient:
     def __init__(self, email: str, password: str):
         self.email = email
         self.password = password
-        self._session: aiohttp.ClientSession | None = None
+        self._session: AsyncSession | None = None
         self._authenticated = False
 
     async def __aenter__(self):
@@ -60,47 +60,72 @@ class DietlyClient:
 
     async def authenticate(self) -> None:
         """Authenticate with Dietly and establish session."""
-        if self._session is None:
-            self._session = aiohttp.ClientSession()
+        try:
+            if self._session is None:
+                # Use curl_cffi with browser impersonation to bypass Cloudflare protection
+                self._session = AsyncSession(impersonate="chrome120")
 
-        # Login via panel.dietly.pl
-        login_url = f"{self.PANEL_BASE_URL}/auth/login"
-        data = {
-            "username": self.email,
-            "password": self.password,
-        }
+            # First, visit the main page to establish cookies
+            logger.info("Initializing session...")
+            await self._session.get("https://panel.dietly.pl/")
 
-        logger.info("Authenticating to Dietly as %s", self.email)
-        async with self._session.post(
-            login_url,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        ) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
+            # Login via panel.dietly.pl with JSON payload
+            login_url = f"{self.PANEL_BASE_URL}/auth/login"
+            payload = {
+                "username": self.email,
+                "password": self.password,
+            }
+
+            logger.info("Authenticating to Dietly as %s", self.email)
+            resp = await self._session.post(
+                login_url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": "https://panel.dietly.pl",
+                    "Referer": "https://panel.dietly.pl/",
+                    "Accept": "application/json",
+                },
+            )
+
+            if resp.status_code != 200:
+                error_text = resp.text
+                # Clean up session on auth failure
+                await self.close()
                 raise Exception(
-                    f"Dietly login failed: HTTP {resp.status} - {error_text}"
+                    f"Dietly login failed: HTTP {resp.status_code} - {error_text}"
                 )
 
-        # Verify authentication
-        profile_url = f"{self.BASE_URL}/profile"
-        async with self._session.get(
-            profile_url,
-            headers=self._get_headers(),
-        ) as resp:
-            if resp.status != 200:
-                raise Exception(f"Dietly authentication verification failed: HTTP {resp.status}")
+            # Verify authentication
+            profile_url = f"{self.BASE_URL}/profile"
+            resp = await self._session.get(
+                profile_url,
+                headers=self._get_headers(),
+            )
 
-            profile = await resp.json()
+            if resp.status_code != 200:
+                # Clean up session on verification failure
+                await self.close()
+                raise Exception(
+                    f"Dietly authentication verification failed: HTTP {resp.status_code}"
+                )
+
+            profile = resp.json()
             logger.info("Authenticated as: %s", profile.get("email"))
 
-        self._authenticated = True
+            self._authenticated = True
+
+        except Exception as e:
+            # Ensure session is closed on any error
+            await self.close()
+            raise
 
     async def close(self) -> None:
         """Close the HTTP session."""
         if self._session:
             await self._session.close()
             self._session = None
+        self._authenticated = False
 
     def _get_headers(self) -> dict[str, str]:
         """Get headers required for Dietly API calls."""
@@ -118,18 +143,19 @@ class DietlyClient:
         url = f"{self.BASE_URL}/profile/profile-order/all?page=0"
         logger.debug("Fetching active orders from %s", url)
 
-        async with self._session.get(url, headers=self._get_headers()) as resp:
-            if resp.status != 200:
-                raise Exception(f"Failed to fetch orders: HTTP {resp.status}")
+        resp = await self._session.get(url, headers=self._get_headers())
 
-            data = await resp.json()
-            orders = [
-                order
-                for order in data.get("content", [])
-                if order.get("status") == "ACTIVE"
-            ]
-            logger.info("Found %d active orders", len(orders))
-            return orders
+        if resp.status_code != 200:
+            raise Exception(f"Failed to fetch orders: HTTP {resp.status_code}")
+
+        data = resp.json()
+        orders = [
+            order
+            for order in data.get("content", [])
+            if order.get("status") == "ACTIVE"
+        ]
+        logger.info("Found %d active orders", len(orders))
+        return orders
 
     async def get_order_deliveries(self, order_id: int) -> list[dict[str, Any]]:
         """Fetch deliveries for an order."""
@@ -139,16 +165,17 @@ class DietlyClient:
         url = f"{self.BASE_URL}/company/customer/order/{order_id}"
         logger.debug("Fetching deliveries for order %d", order_id)
 
-        async with self._session.get(url, headers=self._get_headers()) as resp:
-            if resp.status != 200:
-                raise Exception(
-                    f"Failed to fetch order {order_id}: HTTP {resp.status}"
-                )
+        resp = await self._session.get(url, headers=self._get_headers())
 
-            data = await resp.json()
-            deliveries = data.get("deliveries", [])
-            logger.debug("Order %d has %d deliveries", order_id, len(deliveries))
-            return deliveries
+        if resp.status_code != 200:
+            raise Exception(
+                f"Failed to fetch order {order_id}: HTTP {resp.status_code}"
+            )
+
+        data = resp.json()
+        deliveries = data.get("deliveries", [])
+        logger.debug("Order %d has %d deliveries", order_id, len(deliveries))
+        return deliveries
 
     async def get_delivery_meals(
         self, delivery_id: int
@@ -160,16 +187,17 @@ class DietlyClient:
         url = f"{self.BASE_URL}/company/general/menus/delivery/{delivery_id}/new"
         logger.debug("Fetching meals for delivery %d", delivery_id)
 
-        async with self._session.get(url, headers=self._get_headers()) as resp:
-            if resp.status != 200:
-                raise Exception(
-                    f"Failed to fetch delivery {delivery_id} meals: HTTP {resp.status}"
-                )
+        resp = await self._session.get(url, headers=self._get_headers())
 
-            data = await resp.json()
-            meals = data.get("deliveryMenuMeal", [])
-            logger.debug("Delivery %d has %d meals", delivery_id, len(meals))
-            return meals
+        if resp.status_code != 200:
+            raise Exception(
+                f"Failed to fetch delivery {delivery_id} meals: HTTP {resp.status_code}"
+            )
+
+        data = resp.json()
+        meals = data.get("deliveryMenuMeal", [])
+        logger.debug("Delivery %d has %d meals", delivery_id, len(meals))
+        return meals
 
     async def get_delivered_meals(
         self, start_date: date, end_date: date

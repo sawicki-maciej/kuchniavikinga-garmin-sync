@@ -366,6 +366,7 @@ cmd_test() {
     local timeout=300
     local elapsed=0
     local status=""
+    local succeeded=""
     
     while [[ $elapsed -lt $timeout ]]; do
         status=$(gcloud run jobs executions describe "$execution_name" \
@@ -373,9 +374,21 @@ cmd_test() {
             --project="$PROJECT_ID" \
             --format="value(status.conditions[0].type)" 2>/dev/null || echo "")
         
+        succeeded=$(gcloud run jobs executions describe "$execution_name" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --format="value(status.succeededCount)" 2>/dev/null || echo "0")
+        
         if [[ "$status" == "Completed" ]]; then
-            log_info "✓ Job completed successfully"
-            break
+            if [[ "$succeeded" == "1" ]]; then
+                log_info "✓ Job completed successfully"
+                break
+            else
+                log_error "✗ Job execution failed (exit code non-zero)"
+                log_info "Fetching logs..."
+                cmd_logs
+                exit 1
+            fi
         elif [[ "$status" == "Failed" ]]; then
             log_error "✗ Job execution failed"
             log_info "Fetching logs..."
@@ -389,6 +402,7 @@ cmd_test() {
     
     if [[ $elapsed -ge $timeout ]]; then
         log_warn "Timeout waiting for job completion"
+        exit 1
     fi
     
     log_info ""
