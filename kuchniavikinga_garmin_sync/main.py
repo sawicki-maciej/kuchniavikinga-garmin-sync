@@ -38,8 +38,11 @@ async def main() -> int:
         # Load configuration from environment
         vikinga_email = get_env_var("VIKINGA_EMAIL")
         vikinga_password = get_env_var("VIKINGA_PASSWORD")
-        garmin_email = get_env_var("GARMIN_EMAIL")
-        garmin_password = get_env_var("GARMIN_PASSWORD")
+        
+        # Note: Garmin authentication now uses tokens from Secret Manager
+        # GARMIN_EMAIL and GARMIN_PASSWORD are no longer used by the job
+        # Run the bootstrap locally first to generate tokens
+        
         state_bucket = get_env_var("STATE_BUCKET", required=False)
         days_back = int(get_env_var("SYNC_DAYS_BACK", required=False) or "1")
         dry_run = get_env_var("DRY_RUN", required=False) == "true"
@@ -61,8 +64,6 @@ async def main() -> int:
         sync = VikingaGarminSync(
             vikinga_email=vikinga_email,
             vikinga_password=vikinga_password,
-            garmin_email=garmin_email,
-            garmin_password=garmin_password,
             state_bucket=state_bucket,
             days_back=days_back,
             dry_run=dry_run,

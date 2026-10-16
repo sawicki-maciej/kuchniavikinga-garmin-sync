@@ -8,15 +8,15 @@ from kuchniavikinga_garmin_sync.dietly_client import DeliveredMeal, NutritionInf
 
 def test_garmin_client_init():
     """Test GarminConnectClient initialization."""
-    client = GarminConnectClient(email="test@example.com", password="testpass")
-    assert client.email == "test@example.com"
-    assert client.password == "testpass"
+    client = GarminConnectClient()
+    assert client.project_id == "maciej-prod"
+    assert client.tokens_secret == "kuchniavikinga-garmin-sync-garmin-tokens"
     assert not client._authenticated
 
 
 def test_estimate_meal_time():
     """Test meal time estimation."""
-    client = GarminConnectClient(email="test@example.com", password="testpass")
+    client = GarminConnectClient()
     
     assert client._estimate_meal_time("Śniadanie") == "07:00:00"
     assert client._estimate_meal_time("II Śniadanie") == "10:00:00"

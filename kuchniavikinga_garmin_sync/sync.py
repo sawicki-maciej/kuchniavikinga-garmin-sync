@@ -18,8 +18,6 @@ class VikingaGarminSync:
         self,
         vikinga_email: str,
         vikinga_password: str,
-        garmin_email: str,
-        garmin_password: str,
         state_bucket: str | None = None,
         days_back: int = 1,
         dry_run: bool = False,
@@ -30,17 +28,17 @@ class VikingaGarminSync:
         Args:
             vikinga_email: Kuchnia Vikinga panel account email
             vikinga_password: Kuchnia Vikinga panel account password
-            garmin_email: Garmin Connect account email
-            garmin_password: Garmin Connect account password
             state_bucket: GCS bucket for state storage (None for local)
             days_back: How many days back to sync (default: 1)
             dry_run: If True, don't write to Garmin (default: False)
             dump_raw: If True, log raw API responses with redacted values
+            
+        Note:
+            Garmin authentication now uses tokens from Secret Manager.
+            No email/password needed - run the bootstrap first.
         """
         self.vikinga_email = vikinga_email
         self.vikinga_password = vikinga_password
-        self.garmin_email = garmin_email
-        self.garmin_password = garmin_password
         self.state_bucket = state_bucket
         self.days_back = days_back
         self.dry_run = dry_run
@@ -131,9 +129,8 @@ class VikingaGarminSync:
                 )
             synced_count = len(new_meals)
         else:
-            async with GarminConnectClient(
-                self.garmin_email, self.garmin_password
-            ) as garmin:
+            # Use token-based auth (no email/password needed)
+            async with GarminConnectClient() as garmin:
                 for meal in new_meals:
                     try:
                         await garmin.log_meal(meal)
