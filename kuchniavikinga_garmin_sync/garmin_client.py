@@ -1,13 +1,10 @@
 """Garmin Connect client wrapper using ha-garmin."""
 
-import json
 import logging
-import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from google.cloud import secretmanager
+from google.cloud import storage
 from ha_garmin import GarminAuth, GarminClient
 from ha_garmin.exceptions import GarminAuthError, GarminConnectError
 
@@ -19,28 +16,28 @@ logger = logging.getLogger(__name__)
 class GarminConnectClient:
     """Wrapper for ha-garmin library to log nutrition data.
     
-    Uses token-based authentication from Google Secret Manager.
+    Uses token-based authentication stored in GCS.
     Never performs password login in Cloud Run to avoid datacenter IP blocks.
     """
 
     def __init__(
         self, 
-        project_id: str = "maciej-prod",
-        tokens_secret: str = "kuchniavikinga-garmin-sync-garmin-tokens",
+        state_bucket: str | None = None,
+        token_filename: str = ".garmin_tokens.json",
     ):
         """Initialize Garmin client with token-based auth.
         
         Args:
-            project_id: GCP project ID
-            tokens_secret: Name of the Secret Manager secret containing tokens
+            state_bucket: GCS bucket name for token storage (None = local file only)
+            token_filename: Name of the token file in GCS and locally
         """
-        self.project_id = project_id
-        self.tokens_secret = tokens_secret
+        self.state_bucket = state_bucket
+        self.token_filename = token_filename
+        self.local_token_path = Path(f"/tmp/{token_filename}")
         self._auth: GarminAuth | None = None
         self._client: GarminClient | None = None
         self._authenticated = False
-        self._session_file: Path | None = None
-        self._tokens_refreshed = False
+        self._tokens_changed = False
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -48,56 +45,60 @@ class GarminConnectClient:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit - persist refreshed tokens."""
-        # Save refreshed tokens back to Secret Manager if they changed
-        if self._authenticated and self._tokens_refreshed and self._session_file:
-            logger.info("Persisting refreshed tokens to Secret Manager...")
+        """Async context manager exit - persist tokens if refreshed."""
+        # Save tokens back to GCS if they changed
+        if self._authenticated and self._tokens_changed and self.state_bucket:
+            logger.info("Uploading refreshed tokens to GCS...")
             try:
-                await self._save_tokens_to_secret_manager()
-                logger.info("Refreshed tokens saved successfully")
+                await self._upload_tokens_to_gcs()
+                logger.info("Refreshed tokens uploaded successfully")
             except Exception as e:
-                logger.error("Failed to save refreshed tokens: %s", e)
+                logger.error("Failed to upload refreshed tokens: %s", e)
         
-        # Clean up temp file
-        if self._session_file:
-            try:
-                self._session_file.unlink(missing_ok=True)
-            except Exception as e:
-                logger.warning("Failed to clean up session file: %s", e)
+        # Clean up local token file
+        try:
+            self.local_token_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.debug("Failed to clean up local token file: %s", e)
 
     async def authenticate(self) -> None:
-        """Authenticate with Garmin Connect using tokens from Secret Manager.
+        """Authenticate with Garmin Connect using tokens from GCS.
         
         Raises:
             Exception: If tokens are missing or invalid. User must run bootstrap.
         """
-        logger.info("Loading Garmin tokens from Secret Manager...")
+        # Download tokens from GCS if bucket is configured
+        if self.state_bucket:
+            logger.info("Downloading Garmin tokens from gs://%s/%s...", 
+                       self.state_bucket, self.token_filename)
+            try:
+                await self._download_tokens_from_gcs()
+            except Exception as e:
+                logger.error("Failed to download tokens from GCS: %s", e)
+                raise Exception(
+                    f"Garmin tokens not found in gs://{self.state_bucket}/{self.token_filename}. "
+                    "Please run the bootstrap locally and upload the token file:\n"
+                    "  1. python3 -m kuchniavikinga_garmin_sync.garmin_bootstrap\n"
+                    f"  2. gsutil cp ~/.garmin_tokens.json gs://{self.state_bucket}/{self.token_filename}"
+                ) from e
+        else:
+            logger.info("Using local token file: %s", self.local_token_path)
 
-        # Load tokens from Secret Manager
-        try:
-            tokens_data = await self._load_tokens_from_secret_manager()
-        except Exception as e:
-            logger.error("Failed to load tokens from Secret Manager: %s", e)
+        # Verify token file exists
+        if not self.local_token_path.exists():
             raise Exception(
-                "Garmin tokens not found in Secret Manager. "
-                "Please run the bootstrap command on your Mac: "
-                "python -m kuchniavikinga_garmin_sync.garmin_bootstrap"
-            ) from e
-
-        # Save tokens to temporary file for ha-garmin
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            f.write(tokens_data)
-            self._session_file = Path(f.name)
-        
-        logger.debug("Tokens saved to temporary file: %s", self._session_file)
+                f"Token file not found: {self.local_token_path}. "
+                "Please run the bootstrap to generate tokens."
+            )
 
         try:
             self._auth = GarminAuth()
             
             # Load session from file
-            success = self._auth.load_session(self._session_file)
+            logger.debug("Loading tokens from %s", self.local_token_path)
+            success = self._auth.load_session(str(self.local_token_path))
             if not success:
-                raise Exception("Failed to load Garmin session from tokens")
+                raise Exception("Failed to load Garmin session from token file")
             
             logger.info("Session loaded successfully")
             
@@ -106,9 +107,9 @@ class GarminConnectClient:
                 refreshed = self._auth.refresh_session()
                 if refreshed:
                     logger.info("Session tokens refreshed")
-                    self._tokens_refreshed = True
-                    # Save refreshed tokens back to temp file
-                    self._auth.save_session(self._session_file)
+                    self._tokens_changed = True
+                    # Save refreshed tokens to local file
+                    self._auth.save_session(str(self.local_token_path))
                 else:
                     logger.debug("Session tokens are still valid, no refresh needed")
             except Exception as e:
@@ -124,47 +125,26 @@ class GarminConnectClient:
             raise Exception(
                 f"Garmin authentication failed: {e}. "
                 "Tokens may be expired or invalid. "
-                "Please re-run the bootstrap command on your Mac: "
-                "python -m kuchniavikinga_garmin_sync.garmin_bootstrap"
+                "Please re-run the bootstrap and re-upload the token file."
             ) from e
 
-    async def _load_tokens_from_secret_manager(self) -> str:
-        """Load tokens from Secret Manager.
+    async def _download_tokens_from_gcs(self) -> None:
+        """Download token file from GCS bucket."""
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(self.state_bucket)
+        blob = bucket.blob(self.token_filename)
         
-        Returns:
-            JSON string containing the session tokens.
-        """
-        client = secretmanager.SecretManagerServiceClient()
-        secret_name = f"projects/{self.project_id}/secrets/{self.tokens_secret}/versions/latest"
-        
-        logger.debug("Accessing secret: %s", secret_name)
-        response = client.access_secret_version(name=secret_name)
-        
-        return response.payload.data.decode('UTF-8')
+        blob.download_to_filename(str(self.local_token_path))
+        logger.debug("Downloaded tokens to %s", self.local_token_path)
     
-    async def _save_tokens_to_secret_manager(self) -> None:
-        """Save refreshed tokens back to Secret Manager."""
-        if not self._session_file:
-            raise Exception("No session file to save")
+    async def _upload_tokens_to_gcs(self) -> None:
+        """Upload refreshed token file to GCS bucket."""
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(self.state_bucket)
+        blob = bucket.blob(self.token_filename)
         
-        # Read the refreshed tokens from file
-        with open(self._session_file, 'r') as f:
-            tokens_data = f.read()
-        
-        # Verify it's valid JSON
-        json.loads(tokens_data)
-        
-        # Add new version to Secret Manager
-        client = secretmanager.SecretManagerServiceClient()
-        parent = f"projects/{self.project_id}/secrets/{self.tokens_secret}"
-        
-        logger.debug("Adding new version to secret: %s", parent)
-        client.add_secret_version(
-            parent=parent,
-            payload={'data': tokens_data.encode('UTF-8')}
-        )
-        
-        logger.info("New token version added to Secret Manager")
+        blob.upload_from_filename(str(self.local_token_path))
+        logger.debug("Uploaded tokens from %s", self.local_token_path)
 
     async def log_meal(self, meal: DeliveredMeal) -> dict:
         """Log a meal to Garmin Connect nutrition.

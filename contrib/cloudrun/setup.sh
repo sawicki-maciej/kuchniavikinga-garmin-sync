@@ -25,9 +25,7 @@ IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 # Secret names (must match existing secrets exactly)
 SECRET_VIKINGA_EMAIL="kuchniavikinga-garmin-sync-vikinga-email"
 SECRET_VIKINGA_PASSWORD="kuchniavikinga-garmin-sync-vikinga-password"
-SECRET_GARMIN_EMAIL="kuchniavikinga-garmin-sync-garmin-email"
-SECRET_GARMIN_PASSWORD="kuchniavikinga-garmin-sync-garmin-password"
-SECRET_GARMIN_TOKENS="kuchniavikinga-garmin-sync-garmin-tokens"
+GARMIN_TOKEN_FILE=".garmin_tokens.json"
 
 # Colors for output
 RED='\033[0;31m'
@@ -151,16 +149,14 @@ create_service_account() {
 grant_permissions() {
     log_info "Granting IAM permissions..."
     
-    # Grant storage.objectUser on state bucket
-    log_info "  Granting storage.objectUser on bucket..."
+    # Grant storage.objectUser on state bucket (for state AND tokens)
+    log_info "  Granting storage.objectUser on bucket (for state + tokens)..."
     gsutil iam ch "serviceAccount:${SERVICE_ACCOUNT}:objectUser" "gs://${STATE_BUCKET}" 2>/dev/null || true
     
     # Grant secretAccessor on credential secrets
     local secrets=(
         "$SECRET_VIKINGA_EMAIL"
         "$SECRET_VIKINGA_PASSWORD"
-        "$SECRET_GARMIN_EMAIL"
-        "$SECRET_GARMIN_PASSWORD"
     )
     
     for secret in "${secrets[@]}"; do
@@ -172,23 +168,6 @@ grant_permissions() {
             --condition=None \
             >/dev/null 2>&1 || true
     done
-    
-    # Grant both accessor and versionAdder on tokens secret (for token refresh)
-    log_info "  Granting secretAccessor on $SECRET_GARMIN_TOKENS..."
-    gcloud secrets add-iam-policy-binding "$SECRET_GARMIN_TOKENS" \
-        --member="serviceAccount:${SERVICE_ACCOUNT}" \
-        --role="roles/secretmanager.secretAccessor" \
-        --project="$PROJECT_ID" \
-        --condition=None \
-        >/dev/null 2>&1 || true
-    
-    log_info "  Granting secretVersionAdder on $SECRET_GARMIN_TOKENS (for token refresh)..."
-    gcloud secrets add-iam-policy-binding "$SECRET_GARMIN_TOKENS" \
-        --member="serviceAccount:${SERVICE_ACCOUNT}" \
-        --role="roles/secretmanager.secretVersionAdder" \
-        --project="$PROJECT_ID" \
-        --condition=None \
-        >/dev/null 2>&1 || true
     
     # Grant run.invoker for Cloud Scheduler
     log_info "  Ensuring service account has run.invoker role..."
@@ -493,14 +472,15 @@ cmd_garmin_login() {
     check_gcloud
     
     log_info "========================================================"
-    log_info "Garmin Token Bootstrap"
+    log_info "Garmin Token Bootstrap (like withings-sync)"
     log_info "========================================================"
     log_info ""
     log_info "This command must be run from a residential IP (your Mac)."
     log_info "It will:"
-    log_info "  1. Fetch Garmin credentials from Secret Manager"
-    log_info "  2. Perform interactive login (with MFA if needed)"
-    log_info "  3. Store session tokens in Secret Manager"
+    log_info "  1. Prompt for Garmin email/password"
+    log_info "  2. Handle MFA interactively"
+    log_info "  3. Save tokens to ~/.garmin_tokens.json"
+    log_info "  4. Show you the gsutil command to upload it"
     log_info ""
     log_info "This avoids datacenter IP blocks and CAPTCHA on Cloud Run."
     log_info ""
@@ -525,6 +505,19 @@ cmd_garmin_login() {
     # Run the bootstrap script
     log_info "Running Garmin authentication bootstrap..."
     python3 -m kuchniavikinga_garmin_sync.garmin_bootstrap
+    
+    # Show upload command
+    log_info ""
+    log_info "========================================================"
+    log_info "Next Step: Upload to GCS"
+    log_info "========================================================"
+    log_info ""
+    log_info "Run this command to upload the tokens to GCS:"
+    log_info ""
+    log_info "  gsutil cp ~/.garmin_tokens.json gs://${STATE_BUCKET}/${GARMIN_TOKEN_FILE}"
+    log_info ""
+    log_info "The Cloud Run job will download and auto-refresh these tokens."
+    log_info ""
 }
 
 # Destroy all infrastructure

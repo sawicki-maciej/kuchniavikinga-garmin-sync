@@ -8,9 +8,9 @@ from kuchniavikinga_garmin_sync.dietly_client import DeliveredMeal, NutritionInf
 
 def test_garmin_client_init():
     """Test GarminConnectClient initialization."""
-    client = GarminConnectClient()
-    assert client.project_id == "maciej-prod"
-    assert client.tokens_secret == "kuchniavikinga-garmin-sync-garmin-tokens"
+    client = GarminConnectClient(state_bucket="test-bucket")
+    assert client.state_bucket == "test-bucket"
+    assert client.token_filename == ".garmin_tokens.json"
     assert not client._authenticated
 
 
