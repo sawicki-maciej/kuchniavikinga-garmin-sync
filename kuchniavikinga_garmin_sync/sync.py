@@ -23,17 +23,19 @@ class VikingaGarminSync:
         state_bucket: str | None = None,
         days_back: int = 1,
         dry_run: bool = False,
+        dump_raw: bool = False,
     ):
         """Initialize the sync service.
 
         Args:
-            vikinga_email: Kuchnia Vikinga / Dietly account email
-            vikinga_password: Kuchnia Vikinga / Dietly account password
+            vikinga_email: Kuchnia Vikinga panel account email
+            vikinga_password: Kuchnia Vikinga panel account password
             garmin_email: Garmin Connect account email
             garmin_password: Garmin Connect account password
             state_bucket: GCS bucket for state storage (None for local)
             days_back: How many days back to sync (default: 1)
             dry_run: If True, don't write to Garmin (default: False)
+            dump_raw: If True, log raw API responses with redacted values
         """
         self.vikinga_email = vikinga_email
         self.vikinga_password = vikinga_password
@@ -42,6 +44,7 @@ class VikingaGarminSync:
         self.state_bucket = state_bucket
         self.days_back = days_back
         self.dry_run = dry_run
+        self.dump_raw = dump_raw
 
         self.state = SyncState(bucket_name=state_bucket)
 
@@ -68,7 +71,7 @@ class VikingaGarminSync:
 
         # Fetch meals from Kuchnia Vikinga
         async with DietlyClient(
-            self.vikinga_email, self.vikinga_password
+            self.vikinga_email, self.vikinga_password, dump_raw=self.dump_raw
         ) as dietly:
             meals = await dietly.get_delivered_meals(start_date, end_date)
 

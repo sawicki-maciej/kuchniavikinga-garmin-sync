@@ -1,13 +1,24 @@
-"""Dietly API client for Kuchnia Vikinga meal data.
+"""Kuchnia Vikinga customer panel API client.
 
-This client uses the reverse-engineered internal API from panel.dietly.pl.
-It is UNOFFICIAL and may break if Dietly changes their API.
+This client uses the internal API from panel.kuchniavikinga.pl.
+It is UNOFFICIAL and may break if the panel changes.
+
+Authentication flow (from real browser traffic):
+1. GET /api/profile to obtain SESSION and XSRF-TOKEN cookies
+2. POST /api/auth/login with form-encoded credentials
+3. Re-read XSRF-TOKEN after login (it changes)
+4. All subsequent requests need:
+   - SESSION and XSRF-TOKEN cookies
+   - x-xsrf-token header matching XSRF-TOKEN cookie value
+   - company-id and x-launcher-type headers
 """
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from curl_cffi.requests import AsyncSession
 
@@ -39,17 +50,17 @@ class DeliveredMeal:
 class DietlyClient:
     """Client for Kuchnia Vikinga customer panel API.
     
-    Based on JS bundle analysis of panel.kuchniavikinga.pl.
-    The panel is Dietly-powered white-label platform hosted on Heroku behind Cloudflare.
+    Implements the actual authentication flow from browser traffic capture.
     """
 
-    # Base URL from JS bundle: baseUrl: '/api' relative to panel.kuchniavikinga.pl
     BASE_URL = "https://panel.kuchniavikinga.pl/api"
+    PANEL_ORIGIN = "https://panel.kuchniavikinga.pl"
     COMPANY_ID = "kuchniavikinga"
 
-    def __init__(self, email: str, password: str):
+    def __init__(self, email: str, password: str, dump_raw: bool = False):
         self.email = email
         self.password = password
+        self.dump_raw = dump_raw
         self._session: AsyncSession | None = None
         self._authenticated = False
 
@@ -65,34 +76,57 @@ class DietlyClient:
     async def authenticate(self) -> None:
         """Authenticate with Kuchnia Vikinga customer panel.
         
-        Based on JS bundle analysis: POST /api/auth/login
-        Uses curl_cffi with browser impersonation to handle Cloudflare protection.
+        Flow from real browser traffic:
+        1. GET /api/profile to obtain SESSION and XSRF-TOKEN cookies
+        2. POST /api/auth/login with form-encoded credentials
+        3. XSRF-TOKEN changes after login, re-read from cookies
         """
         try:
             if self._session is None:
-                # Use curl_cffi with browser impersonation
+                # Use curl_cffi with browser impersonation for Cloudflare
                 self._session = AsyncSession(impersonate="chrome120")
 
-            # Visit login page first to establish session/cookies
-            logger.info("Initializing session...")
-            await self._session.get("https://panel.kuchniavikinga.pl/logowanie")
+            # Step 1: Get SESSION and XSRF-TOKEN cookies
+            logger.info("Obtaining CSRF tokens...")
+            profile_url = f"{self.BASE_URL}/profile"
+            resp = await self._session.get(
+                profile_url,
+                headers={
+                    "Accept": "application/json",
+                    "Origin": self.PANEL_ORIGIN,
+                    "Referer": f"{self.PANEL_ORIGIN}/",
+                }
+            )
+            
+            # We expect 401 Unauthorized here (not logged in yet)
+            if resp.status_code not in [200, 401]:
+                logger.warning("Unexpected status getting tokens: %d", resp.status_code)
+            
+            xsrf_token = self._session.cookies.get("XSRF-TOKEN")
+            if not xsrf_token:
+                raise Exception("Failed to obtain XSRF-TOKEN cookie")
+            
+            logger.debug("Obtained XSRF-TOKEN: %s", xsrf_token[:20] + "...")
 
-            # Login endpoint from JS: baseUrl + 'auth/login'
+            # Step 2: Login with form-encoded credentials
             login_url = f"{self.BASE_URL}/auth/login"
-            payload = {
+            login_data = urlencode({
                 "username": self.email,
                 "password": self.password,
-            }
+            })
 
             logger.info("Authenticating to Kuchnia Vikinga panel as %s", self.email)
             resp = await self._session.post(
                 login_url,
-                json=payload,
+                data=login_data,
                 headers={
-                    "Content-Type": "application/json",
-                    "Origin": "https://panel.kuchniavikinga.pl",
-                    "Referer": "https://panel.kuchniavikinga.pl/logowanie",
+                    "Content-Type": "application/x-www-form-urlencoded",
                     "Accept": "application/json",
+                    "Origin": self.PANEL_ORIGIN,
+                    "Referer": f"{self.PANEL_ORIGIN}/logowanie",
+                    "x-xsrf-token": xsrf_token,
+                    "company-id": self.COMPANY_ID,
+                    "x-launcher-type": "BROWSER_PANEL",
                 },
             )
 
@@ -101,23 +135,33 @@ class DietlyClient:
                 # Clean up session on auth failure
                 await self.close()
                 raise Exception(
-                    f"Kuchnia Vikinga login failed: HTTP {resp.status_code} - {error_text}"
+                    f"Login failed: HTTP {resp.status_code} - {error_text}"
                 )
 
+            logger.info("Login successful")
+
+            # Step 3: XSRF-TOKEN changes after login, re-read it
+            new_xsrf_token = self._session.cookies.get("XSRF-TOKEN")
+            if new_xsrf_token:
+                logger.debug("XSRF-TOKEN updated after login")
+            
             # Verify authentication by fetching profile
-            # Endpoint from JS: 'profile'
-            profile_url = f"{self.BASE_URL}/profile"
-            resp = await self._session.get(profile_url)
+            resp = await self._session.get(
+                profile_url,
+                headers=self._get_headers(),
+            )
 
             if resp.status_code != 200:
-                # Clean up session on verification failure
                 await self.close()
                 raise Exception(
-                    f"Profile fetch failed: HTTP {resp.status_code}"
+                    f"Profile verification failed: HTTP {resp.status_code}"
                 )
 
             profile = resp.json()
             logger.info("Authenticated as: %s", profile.get("email"))
+            
+            if self.dump_raw:
+                self._dump_json("profile", profile)
 
             self._authenticated = True
 
@@ -136,59 +180,95 @@ class DietlyClient:
     def _get_headers(self) -> dict[str, str]:
         """Get headers for API calls.
         
-        Based on panel behavior - minimal headers needed after authentication.
+        From browser traffic: requires x-xsrf-token, company-id, x-launcher-type.
+        The XSRF-TOKEN cookie changes after login, so we read it fresh each time.
         """
+        if not self._session:
+            raise Exception("No session available")
+        
+        xsrf_token = self._session.cookies.get("XSRF-TOKEN")
+        if not xsrf_token:
+            raise Exception("XSRF-TOKEN cookie not found")
+        
         return {
             "Accept": "application/json",
+            "Origin": self.PANEL_ORIGIN,
+            "Referer": f"{self.PANEL_ORIGIN}/",
+            "x-xsrf-token": xsrf_token,
+            "company-id": self.COMPANY_ID,
+            "x-launcher-type": "BROWSER_PANEL",
         }
-
-    async def get_active_orders(self) -> list[dict[str, Any]]:
-        """Fetch all active orders.
+    
+    def _dump_json(self, name: str, data: Any) -> None:
+        """Dump JSON structure with redacted values for debugging."""
+        if not self.dump_raw:
+            return
         
-        Endpoint from JS: 'company/customer/order/all'
+        def redact(obj: Any, path: str = "") -> Any:
+            """Recursively redact sensitive values while preserving structure."""
+            if isinstance(obj, dict):
+                return {k: redact(v, f"{path}.{k}") for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [redact(item, f"{path}[{i}]") for i, item in enumerate(obj)]
+            elif isinstance(obj, str):
+                return f"<str len={len(obj)}>"
+            elif isinstance(obj, (int, float)):
+                return f"<{type(obj).__name__}>"
+            elif isinstance(obj, bool):
+                return f"<bool>"
+            elif obj is None:
+                return None
+            else:
+                return f"<{type(obj).__name__}>"
+        
+        redacted = redact(data)
+        logger.info("RAW JSON [%s]:\n%s", name, json.dumps(redacted, indent=2))
+
+    async def get_active_order_ids(self) -> list[int]:
+        """Fetch active order IDs.
+        
+        From browser traffic: GET /api/company/customer/order/active-ids
         """
         if not self._authenticated or not self._session:
             raise Exception("Not authenticated - call authenticate() first")
 
-        # Endpoint from JS bundle analysis
-        url = f"{self.BASE_URL}/company/customer/order/all"
-        logger.debug("Fetching orders from %s", url)
+        url = f"{self.BASE_URL}/company/customer/order/active-ids"
+        logger.debug("Fetching active order IDs from %s", url)
 
         resp = await self._session.get(url, headers=self._get_headers())
 
         if resp.status_code != 200:
-            raise Exception(f"Failed to fetch orders: HTTP {resp.status_code}")
+            raise Exception(f"Failed to fetch active order IDs: HTTP {resp.status_code}")
 
         data = resp.json()
         
-        # Filter for active orders - structure needs verification with real data
-        orders = []
+        if self.dump_raw:
+            self._dump_json("active_order_ids", data)
+        
+        # Parse defensively - could be a list of IDs or objects
         if isinstance(data, list):
-            orders = [order for order in data if order.get("status") == "ACTIVE"]
-        elif isinstance(data, dict) and "content" in data:
-            orders = [
-                order
-                for order in data.get("content", [])
-                if order.get("status") == "ACTIVE"
-            ]
+            if data and isinstance(data[0], int):
+                order_ids = data
+            elif data and isinstance(data[0], dict):
+                order_ids = [item.get("id") or item.get("orderId") for item in data]
+            else:
+                order_ids = []
         else:
-            # If it's a different structure, return all and let caller filter
-            orders = [data] if isinstance(data, dict) else []
+            order_ids = []
             
-        logger.info("Found %d active orders", len(orders))
-        return orders
+        logger.info("Found %d active order IDs", len(order_ids))
+        return order_ids
 
     async def get_order_deliveries(self, order_id: int) -> list[dict[str, Any]]:
-        """Fetch deliveries for an order.
+        """Fetch order with its deliveries.
         
-        Endpoint from JS: 'company/customer/order/${orderId}'
+        From browser traffic: GET /api/company/customer/order/{orderId}
         """
         if not self._authenticated or not self._session:
             raise Exception("Not authenticated")
 
-        # Endpoint from JS bundle analysis
         url = f"{self.BASE_URL}/company/customer/order/{order_id}"
-        logger.debug("Fetching deliveries for order %d", order_id)
+        logger.debug("Fetching order %d with deliveries", order_id)
 
         resp = await self._session.get(url, headers=self._get_headers())
 
@@ -198,6 +278,11 @@ class DietlyClient:
             )
 
         data = resp.json()
+        
+        if self.dump_raw:
+            self._dump_json(f"order_{order_id}", data)
+        
+        # Parse defensively - deliveries might be nested
         deliveries = data.get("deliveries", [])
         logger.debug("Order %d has %d deliveries", order_id, len(deliveries))
         return deliveries
@@ -205,14 +290,13 @@ class DietlyClient:
     async def get_delivery_meals(
         self, delivery_id: int
     ) -> list[dict[str, Any]]:
-        """Fetch meal details for a delivery.
+        """Fetch meal details with nutrition for a delivery.
         
-        Endpoint from JS: 'company/general/menus/delivery/${deliveryId}/new'
+        From browser traffic: GET /api/company/general/menus/delivery/{deliveryId}/new
         """
         if not self._authenticated or not self._session:
             raise Exception("Not authenticated")
 
-        # Endpoint from JS bundle analysis
         url = f"{self.BASE_URL}/company/general/menus/delivery/{delivery_id}/new"
         logger.debug("Fetching meals for delivery %d", delivery_id)
 
@@ -224,7 +308,21 @@ class DietlyClient:
             )
 
         data = resp.json()
-        meals = data.get("deliveryMenuMeal", [])
+        
+        if self.dump_raw:
+            self._dump_json(f"delivery_{delivery_id}_meals", data)
+        
+        # Parse defensively - check multiple possible keys
+        meals = (
+            data.get("deliveryMenuMeal") or
+            data.get("meals") or
+            data.get("deliveryMeals") or
+            []
+        )
+        
+        if not meals and isinstance(data, list):
+            meals = data
+            
         logger.debug("Delivery %d has %d meals", delivery_id, len(meals))
         return meals
 
@@ -232,11 +330,11 @@ class DietlyClient:
         self, start_date: date, end_date: date
     ) -> list[DeliveredMeal]:
         """Fetch all delivered meals in the date range."""
-        orders = await self.get_active_orders()
+        # Get active order IDs first
+        order_ids = await self.get_active_order_ids()
         delivered_meals: list[DeliveredMeal] = []
 
-        for order in orders:
-            order_id = order["orderId"]
+        for order_id in order_ids:
             logger.debug("Processing order %d", order_id)
 
             deliveries = await self.get_order_deliveries(order_id)

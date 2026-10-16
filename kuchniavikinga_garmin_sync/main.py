@@ -43,6 +43,7 @@ async def main() -> int:
         state_bucket = get_env_var("STATE_BUCKET", required=False)
         days_back = int(get_env_var("SYNC_DAYS_BACK", required=False) or "1")
         dry_run = get_env_var("DRY_RUN", required=False) == "true"
+        dump_raw = get_env_var("DUMP_RAW", required=False) == "true"
 
         # Create and run sync
         sync = VikingaGarminSync(
@@ -53,6 +54,7 @@ async def main() -> int:
             state_bucket=state_bucket,
             days_back=days_back,
             dry_run=dry_run,
+            dump_raw=dump_raw,
         )
 
         result = await sync.run()
