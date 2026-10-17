@@ -38,10 +38,11 @@ class ResyncService:
 
         This will:
         1. Find Garmin nutrition logs created by this tool for the date
-        2. Delete those entries from Garmin
-        3. Clear them from sync state
-        4. Re-fetch meals from Kuchnia Vikinga
-        5. Re-log them to Garmin with correct data
+        2. Verify all state entries have matching Garmin entries (safety check)
+        3. Delete those entries from Garmin
+        4. Clear them from sync state
+        5. Re-fetch meals from Kuchnia Vikinga
+        6. Re-log them to Garmin with correct data
 
         Args:
             target_date: The date to resync
@@ -60,11 +61,31 @@ class ResyncService:
         }
 
         # Step 1: Find entries to delete
-        entries_to_delete = await self._find_entries_to_delete(target_date)
+        entries_to_delete, unmatched_state_entries = await self._find_entries_to_delete(target_date)
 
         if not entries_to_delete:
             logger.info("No entries found to resync for %s", target_date)
             return stats
+        
+        # Step 2: Safety check - abort if any state entries have no Garmin match
+        if unmatched_state_entries:
+            logger.error(
+                "SAFETY ABORT: %d state entries have no matching Garmin entry",
+                len(unmatched_state_entries)
+            )
+            logger.error("This would cause duplicates. State entries without Garmin match:")
+            for entry in unmatched_state_entries:
+                logger.error("  - %s (key: %s)", entry.get("meal_name"), entry.get("meal_key"))
+            
+            if not self.dry_run:
+                logger.error("Aborting live resync to prevent duplicates")
+                raise Exception(
+                    f"Cannot resync: {len(unmatched_state_entries)} state entries have no Garmin match. "
+                    "This would create duplicates."
+                )
+            else:
+                logger.warning("[DRY RUN] Would abort due to unmatched state entries")
+                stats["skipped"] = len(unmatched_state_entries)
 
         logger.info("Found %d entries to delete and re-log", len(entries_to_delete))
 
@@ -166,7 +187,7 @@ class ResyncService:
 
         return stats
 
-    async def _find_entries_to_delete(self, target_date: date) -> list[dict]:
+    async def _find_entries_to_delete(self, target_date: date) -> tuple[list[dict], list[dict]]:
         """Find Garmin nutrition log entries to delete for a date.
 
         Tries two sources:
@@ -177,51 +198,98 @@ class ResyncService:
             target_date: The date to query
 
         Returns:
-            List of entries with meal_key, meal_name, and optionally garmin_log_id
+            Tuple of:
+            - List of entries to delete with meal_key, meal_name, and garmin_log_id
+            - List of unmatched state entries (state has entry but no Garmin match found)
         """
-        entries = []
+        entries_to_delete = []
+        unmatched_state_entries = []
 
         # Source 1: Check sync state for stored IDs
         synced_meals = self.state.get_synced_meals_for_date(target_date)
         logger.info("Found %d meals in sync state for %s", len(synced_meals), target_date)
 
+        # Build a map of state entries
+        state_entries = {}
         for record in synced_meals:
             meal_key = record["key"]
             meal_data = record["data"]
             garmin_log_id = meal_data.get("garmin_log_id")
             meal_name = meal_data.get("meal_name", "Unknown")
-
-            entries.append({
+            
+            state_entries[meal_key] = {
                 "meal_key": meal_key,
                 "meal_name": meal_name,
                 "garmin_log_id": garmin_log_id,
                 "source": "state",
-            })
+                "matched": False  # Will mark True if found in Garmin
+            }
 
         # Source 2: Query Garmin API for entries named "KV: ..."
         # This catches entries if state was lost or IDs weren't stored
         try:
-            garmin_logs = await self.garmin.list_nutrition_logs(target_date)
+            # Enable dump_raw if DUMP_RAW env var is set
+            import os
+            dump_raw = os.getenv("DUMP_RAW", "").lower() == "true"
+            
+            garmin_logs = await self.garmin.list_nutrition_logs(target_date, dump_raw=dump_raw)
             logger.info("Found %d total nutrition logs in Garmin for %s", len(garmin_logs), target_date)
 
             for log in garmin_logs:
-                log_name = log.get("name") or log.get("foodName") or ""
-                log_id = log.get("nutritionLogId") or log.get("logId")
+                # Check multiple possible field names for the log name and ID
+                log_name = log.get("name") or log.get("foodName") or log.get("description") or ""
+                log_id = (
+                    log.get("foodLogId") or 
+                    log.get("nutritionLogId") or 
+                    log.get("logId") or 
+                    log.get("id")
+                )
 
                 # Only consider entries created by this tool (named "KV: ...")
                 if log_name.startswith("KV: ") and log_id:
-                    # Check if we already have it from state
-                    if not any(e.get("garmin_log_id") == log_id for e in entries):
-                        logger.info("Found Garmin log not in state: %s (ID: %s)", log_name, log_id)
-                        entries.append({
-                            "meal_key": f"garmin-{log_id}",  # Synthetic key
+                    # Check if this matches any state entry by ID
+                    matched = False
+                    for state_entry in state_entries.values():
+                        if state_entry["garmin_log_id"] == log_id:
+                            state_entry["matched"] = True
+                            matched = True
+                            break
+                    
+                    # Add to delete list (either matched state entry or orphan)
+                    if not any(e.get("garmin_log_id") == log_id for e in entries_to_delete):
+                        entry = {
+                            "meal_key": f"garmin-{log_id}" if not matched else None,
                             "meal_name": log_name,
                             "garmin_log_id": log_id,
-                            "source": "garmin",
-                        })
+                            "source": "garmin" if not matched else "matched",
+                        }
+                        
+                        # Update meal_key from state if matched
+                        for state_entry in state_entries.values():
+                            if state_entry["garmin_log_id"] == log_id:
+                                entry["meal_key"] = state_entry["meal_key"]
+                                break
+                        
+                        entries_to_delete.append(entry)
+                        
+                        if not matched:
+                            logger.info("Found Garmin log not in state: %s (ID: %s)", log_name, log_id)
 
         except Exception as e:
-            logger.warning("Could not query Garmin API for logs: %s", e)
-            logger.info("Will rely on sync state only")
+            logger.error("Failed to query Garmin API for logs: %s", e)
+            logger.warning("Cannot verify state entries against Garmin - unsafe to proceed")
+            # If we can't query Garmin, mark all state entries as unmatched
+            unmatched_state_entries = list(state_entries.values())
+            return [], unmatched_state_entries
 
-        return entries
+        # Identify unmatched state entries (in state but not found in Garmin)
+        for state_entry in state_entries.values():
+            if not state_entry["matched"]:
+                unmatched_state_entries.append(state_entry)
+                logger.warning(
+                    "State entry has no Garmin match: %s (ID: %s)",
+                    state_entry["meal_name"],
+                    state_entry.get("garmin_log_id")
+                )
+
+        return entries_to_delete, unmatched_state_entries

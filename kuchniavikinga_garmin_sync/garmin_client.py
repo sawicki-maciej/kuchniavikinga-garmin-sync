@@ -211,60 +211,118 @@ class GarminConnectClient:
             logger.error("Failed to log meal %s: %s", name, e)
             raise
     
-    async def list_nutrition_logs(self, target_date: date) -> list[dict]:
+    async def list_nutrition_logs(self, target_date: date, dump_raw: bool = False) -> list[dict]:
         """List nutrition log entries for a specific date.
+        
+        This queries the Garmin nutrition-service API which returns meal details
+        containing individual food log entries.
         
         Args:
             target_date: The date to query
+            dump_raw: If True, log the raw response structure (values redacted)
             
         Returns:
-            List of nutrition log entries
+            List of nutrition log entries (food items logged for the day)
         """
         try:
+            # Use ha-garmin's get_nutrition_log which fetches from
+            # /nutrition-service/food/logs/{date}?includeGoals=true&includeNutrition=true
             data = await self._client.get_nutrition_log(target_date)
             
-            # The API returns a dict with various keys; log entries are typically in a list
-            # Extract all log entries (check common keys)
+            if dump_raw:
+                # Log the raw structure with redacted values for debugging
+                redacted = self._redact_nutrition_response(data)
+                logger.warning(
+                    "DUMP_RAW nutrition log response for %s: %s",
+                    target_date,
+                    redacted
+                )
+            
+            # Extract food logs from the response
+            # Structure: {"mealDetails": [{"meal": {...}, "foodLogs": [...]}]}
             logs = []
             if isinstance(data, dict):
-                # Try common key names for nutrition logs
-                for key in ['nutritionLogs', 'logs', 'foodLogs', 'items', 'meals']:
-                    if key in data and isinstance(data[key], list):
-                        logs.extend(data[key])
+                meal_details = data.get("mealDetails", [])
+                if isinstance(meal_details, list):
+                    for meal_detail in meal_details:
+                        if isinstance(meal_detail, dict):
+                            food_logs = meal_detail.get("foodLogs", [])
+                            if isinstance(food_logs, list):
+                                logs.extend(food_logs)
                 
-                # If no list found, log the structure for debugging
-                if not logs:
-                    logger.debug("Nutrition log structure for %s: %s", target_date, list(data.keys()))
+                # If we didn't find logs, log the structure
+                if not logs and data:
+                    logger.warning(
+                        "No food logs found for %s. Available keys: %s. mealDetails count: %d",
+                        target_date,
+                        list(data.keys()),
+                        len(meal_details) if isinstance(meal_details, list) else 0
+                    )
             
+            logger.info("Found %d nutrition log entries for %s", len(logs), target_date)
             return logs
+            
         except Exception as e:
             logger.error("Failed to list nutrition logs for %s: %s", target_date, e)
             raise
     
+    @staticmethod
+    def _redact_nutrition_response(data: dict) -> dict:
+        """Redact sensitive values from nutrition response while keeping structure."""
+        if not isinstance(data, dict):
+            return data
+        
+        redacted = {}
+        for key, value in data.items():
+            if isinstance(value, dict):
+                redacted[key] = GarminConnectClient._redact_nutrition_response(value)
+            elif isinstance(value, list):
+                if value and isinstance(value[0], dict):
+                    # Keep first item structure, redact others
+                    redacted[key] = [
+                        GarminConnectClient._redact_nutrition_response(value[0]),
+                        f"... {len(value)-1} more items ..."
+                    ] if len(value) > 1 else [GarminConnectClient._redact_nutrition_response(value[0])]
+                else:
+                    redacted[key] = f"[{len(value)} items]"
+            elif isinstance(value, (str, int, float, bool)):
+                # Keep IDs, keys, counts, booleans; redact string values
+                if any(k in key.lower() for k in ['id', 'count', 'type', 'name']) or isinstance(value, (int, bool)):
+                    redacted[key] = value
+                else:
+                    redacted[key] = "<redacted>"
+            else:
+                redacted[key] = type(value).__name__
+        
+        return redacted
+    
     async def delete_nutrition_log(self, log_id: int) -> bool:
         """Delete a nutrition log entry by ID.
         
+        Uses the Garmin nutrition-service API endpoint to delete a food log entry.
+        
         Args:
-            log_id: The Garmin nutrition log ID to delete
+            log_id: The Garmin food log ID to delete (from foodLog.foodLogId)
             
         Returns:
             True if deletion succeeded
         """
         try:
-            # Use the authenticated client to make a DELETE request
-            # The endpoint pattern is typically /nutritionservice/v3/nutrition-logs/{logId}
+            # Delete a food log entry
+            # Endpoint: DELETE /nutrition-service/food/logs/{foodLogId}
             from ha_garmin.client import NUTRITION_LOGS_URL
             
-            # Extract the base URL and make a DELETE request
+            # NUTRITION_LOGS_URL is https://connect.garmin.com/gc-api/nutrition-service/food/logs
+            # To delete: DELETE /nutrition-service/food/logs/{foodLogId}
             url = f"{NUTRITION_LOGS_URL}/{log_id}"
             
             # Access the internal _request method
             await self._client._request("DELETE", url)
-            logger.info("Deleted Garmin nutrition log %s", log_id)
+            logger.info("Deleted Garmin food log %s", log_id)
             return True
             
         except Exception as e:
-            logger.error("Failed to delete nutrition log %s: %s", log_id, e)
+            logger.error("Failed to delete food log %s: %s", log_id, e)
             raise
 
     @staticmethod
