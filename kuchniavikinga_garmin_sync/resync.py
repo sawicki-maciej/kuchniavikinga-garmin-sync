@@ -156,7 +156,11 @@ class ResyncService:
                     result = await self.garmin.log_meal(meal)
 
                     # Extract log ID from result if available
-                    log_id = result.get("nutritionLogId") or result.get("logId")
+                    # logId is a 32-char hex string like '1ecbb709157543948c25eafa2c74edc7'
+                    log_id = result.get("logId") or result.get("nutritionLogId")
+
+                    if log_id:
+                        logger.debug("Stored Garmin logId for re-logged meal: %s", log_id)
 
                     self.state.mark_synced(meal, garmin_log_id=log_id)
                     stats["relogged"] += 1
@@ -236,24 +240,58 @@ class ResyncService:
             logger.info("Found %d total nutrition logs in Garmin for %s", len(garmin_logs), target_date)
 
             for log in garmin_logs:
-                # Check multiple possible field names for the log name and ID
-                log_name = log.get("name") or log.get("foodName") or log.get("description") or ""
-                log_id = (
-                    log.get("foodLogId") or 
-                    log.get("nutritionLogId") or 
-                    log.get("logId") or 
-                    log.get("id")
-                )
+                # Extract log name and ID from real API structure
+                # Real structure: {logId: "hex-string", foodMetaData: {foodName: "KV: ..."}, ...}
+                # Old guessed structure: {foodLogId: int, name: "KV: ...", ...}
+                
+                # Try real structure first
+                food_meta = log.get("foodMetaData", {})
+                log_name = food_meta.get("foodName") if isinstance(food_meta, dict) else None
+                log_id = log.get("logId")
+                
+                # Fallback to old structure
+                if not log_name:
+                    log_name = log.get("name") or log.get("foodName") or log.get("description") or ""
+                if not log_id:
+                    log_id = log.get("foodLogId") or log.get("nutritionLogId") or log.get("id")
+                
+                # Extract calories for matching when IDs aren't available
+                nutrition_content = log.get("nutritionContent", {})
+                log_calories = nutrition_content.get("calories") if isinstance(nutrition_content, dict) else None
 
                 # Only consider entries created by this tool (named "KV: ...")
-                if log_name.startswith("KV: ") and log_id:
-                    # Check if this matches any state entry by ID
+                if log_name and log_name.startswith("KV: ") and log_id:
+                    # Check if this matches any state entry by ID (if IDs are stored)
                     matched = False
+                    matched_by_name = False
+                    
                     for state_entry in state_entries.values():
-                        if state_entry["garmin_log_id"] == log_id:
+                        # Try matching by ID first (if we have it)
+                        if state_entry["garmin_log_id"] and state_entry["garmin_log_id"] == log_id:
                             state_entry["matched"] = True
                             matched = True
                             break
+                    
+                    # If no ID match and state has no IDs, try matching by meal name
+                    # Garmin truncates names to ~44 chars, so check if log_name starts with meal_name
+                    if not matched:
+                        for state_entry in state_entries.values():
+                            if not state_entry["garmin_log_id"]:  # Only if state has no ID stored
+                                # Extract meal name from KV-prefixed name
+                                # Format: "KV: [Polish meal name] - [dish name]"
+                                state_meal_name = state_entry["meal_name"]
+                                # Check if the Garmin log name contains this meal name
+                                if state_meal_name in log_name:
+                                    state_entry["matched"] = True
+                                    matched = True
+                                    matched_by_name = True
+                                    logger.info(
+                                        "Matched by name: state '%s' -> Garmin '%s' (ID: %s)",
+                                        state_meal_name,
+                                        log_name[:50],
+                                        log_id
+                                    )
+                                    break
                     
                     # Add to delete list (either matched state entry or orphan)
                     if not any(e.get("garmin_log_id") == log_id for e in entries_to_delete):
@@ -261,19 +299,20 @@ class ResyncService:
                             "meal_key": f"garmin-{log_id}" if not matched else None,
                             "meal_name": log_name,
                             "garmin_log_id": log_id,
-                            "source": "garmin" if not matched else "matched",
+                            "source": "garmin" if not matched else ("matched-by-name" if matched_by_name else "matched"),
                         }
                         
                         # Update meal_key from state if matched
                         for state_entry in state_entries.values():
-                            if state_entry["garmin_log_id"] == log_id:
+                            if (state_entry["garmin_log_id"] and state_entry["garmin_log_id"] == log_id) or \
+                               (matched_by_name and state_entry["meal_name"] in log_name):
                                 entry["meal_key"] = state_entry["meal_key"]
                                 break
                         
                         entries_to_delete.append(entry)
                         
                         if not matched:
-                            logger.info("Found Garmin log not in state: %s (ID: %s)", log_name, log_id)
+                            logger.info("Found Garmin log not in state: %s (ID: %s)", log_name[:50], log_id)
 
         except Exception as e:
             logger.error("Failed to query Garmin API for logs: %s", e)

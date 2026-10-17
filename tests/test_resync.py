@@ -36,16 +36,17 @@ async def test_resync_with_stored_ids():
     }}
     
     # Mock Garmin API responses - return logs that match the state IDs
+    # Use real production structure: logId (hex string), foodMetaData.foodName
     garmin_mock.list_nutrition_logs = AsyncMock(return_value=[
         {
-            "name": "KV: Śniadanie - Test Breakfast",
-            "foodLogId": 12345,
-            "calories": 400
+            "logId": 12345,  # State has numeric IDs stored
+            "foodMetaData": {"foodName": "KV: Śniadanie - Test Breakfast"},
+            "nutritionContent": {"calories": 400}
         },
         {
-            "name": "KV: Obiad - Test Lunch",
-            "foodLogId": 67890,
-            "calories": 600
+            "logId": 67890,
+            "foodMetaData": {"foodName": "KV: Obiad - Test Lunch"},
+            "nutritionContent": {"calories": 600}
         }
     ])
     garmin_mock.delete_nutrition_log = AsyncMock(return_value=True)
@@ -110,11 +111,12 @@ async def test_resync_dry_run():
     }}
     
     # Mock Garmin API to return matching log
+    # Use real production structure
     garmin_mock.list_nutrition_logs = AsyncMock(return_value=[
         {
-            "name": "KV: Śniadanie - Test Meal",
-            "foodLogId": 12345,
-            "calories": 400
+            "logId": 12345,
+            "foodMetaData": {"foodName": "KV: Śniadanie - Test Meal"},
+            "nutritionContent": {"calories": 400}
         }
     ])
     
@@ -157,21 +159,22 @@ async def test_resync_finds_garmin_entries_without_state():
     state._state = {"synced_meals": {}}
     
     # Mock Garmin API to return entries created by this tool (named "KV: ...")
+    # Use real production structure with hex string logIds
     garmin_mock.list_nutrition_logs = AsyncMock(return_value=[
         {
-            "name": "KV: Śniadanie - Test Meal",
-            "foodLogId": 11111,
-            "calories": 400
+            "logId": "abc1111def2222ghi3333jkl4444mno5",
+            "foodMetaData": {"foodName": "KV: Śniadanie - Test Meal"},
+            "nutritionContent": {"calories": 400}
         },
         {
-            "name": "Random App Entry",
-            "foodLogId": 22222,
-            "calories": 300
+            "logId": "xyz7777uvw8888rst9999opq0000lmn1",
+            "foodMetaData": {"foodName": "Random App Entry"},
+            "nutritionContent": {"calories": 300}
         },
         {
-            "name": "KV: Obiad - Another Meal",
-            "foodLogId": 33333,
-            "calories": 600
+            "logId": "pqr5555stu6666vwx7777yza8888bcd9",
+            "foodMetaData": {"foodName": "KV: Obiad - Another Meal"},
+            "nutritionContent": {"calories": 600}
         }
     ])
     
@@ -204,8 +207,8 @@ async def test_resync_finds_garmin_entries_without_state():
     # Should find and delete only the "KV: " entries, not "Random App Entry"
     assert result["deleted"] == 2  # Only KV entries
     assert garmin_mock.delete_nutrition_log.call_count == 2
-    garmin_mock.delete_nutrition_log.assert_any_call(11111)
-    garmin_mock.delete_nutrition_log.assert_any_call(33333)
+    garmin_mock.delete_nutrition_log.assert_any_call("abc1111def2222ghi3333jkl4444mno5")
+    garmin_mock.delete_nutrition_log.assert_any_call("pqr5555stu6666vwx7777yza8888bcd9")
     
     # Verify meals were re-logged
     assert result["relogged"] == 2

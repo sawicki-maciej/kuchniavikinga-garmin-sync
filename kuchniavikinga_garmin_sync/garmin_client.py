@@ -205,6 +205,23 @@ class GarminConnectClient:
                 timestamp=timestamp,
             )
             logger.debug("Garmin API response: %s", result)
+            
+            # Try to extract logId from response if available
+            # The response structure may vary, but typically contains the created log data
+            log_id = None
+            if isinstance(result, dict):
+                # Try various possible locations for the logId
+                log_id = result.get("logId")
+                if not log_id and "quickAddItems" in result:
+                    items = result.get("quickAddItems", [])
+                    if items and isinstance(items, list) and len(items) > 0:
+                        log_id = items[0].get("logId")
+            
+            if log_id:
+                logger.debug("Created Garmin log with ID: %s", log_id)
+                # Return modified result with logId at top level for easy access
+                return {**result, "logId": log_id}
+            
             return result
 
         except Exception as e:
@@ -216,6 +233,24 @@ class GarminConnectClient:
         
         This queries the Garmin nutrition-service API which returns meal details
         containing individual food log entries.
+        
+        Real API structure from production:
+        {
+          "mealDate": "2026-10-16",
+          "mealDetails": [
+            {
+              "meal": {"mealId": 447717, "mealName": "BREAKFAST", ...},
+              "loggedFoods": [
+                {
+                  "logId": "1ecbb709157543948c25eafa2c74edc7",  # 32-char hex
+                  "foodMetaData": {"foodName": "KV: Meal Name...", ...},
+                  "nutritionContent": {"calories": 452, ...},
+                  ...
+                }
+              ]
+            }
+          ]
+        }
         
         Args:
             target_date: The date to query
@@ -239,16 +274,23 @@ class GarminConnectClient:
                 )
             
             # Extract food logs from the response
-            # Structure: {"mealDetails": [{"meal": {...}, "foodLogs": [...]}]}
+            # Real structure: {"mealDetails": [{"loggedFoods": [...]}]}
+            # Also support old guessed structure: {"mealDetails": [{"foodLogs": [...]}]}
             logs = []
             if isinstance(data, dict):
                 meal_details = data.get("mealDetails", [])
                 if isinstance(meal_details, list):
                     for meal_detail in meal_details:
                         if isinstance(meal_detail, dict):
-                            food_logs = meal_detail.get("foodLogs", [])
-                            if isinstance(food_logs, list):
-                                logs.extend(food_logs)
+                            # Try real structure first (loggedFoods)
+                            logged_foods = meal_detail.get("loggedFoods")
+                            if logged_foods and isinstance(logged_foods, list):
+                                logs.extend(logged_foods)
+                            else:
+                                # Fallback to old guessed structure (foodLogs)
+                                food_logs = meal_detail.get("foodLogs")
+                                if food_logs and isinstance(food_logs, list):
+                                    logs.extend(food_logs)
                 
                 # If we didn't find logs, log the structure
                 if not logs and data:
@@ -296,28 +338,36 @@ class GarminConnectClient:
         
         return redacted
     
-    async def delete_nutrition_log(self, log_id: int) -> bool:
+    async def delete_nutrition_log(self, log_id: str) -> bool:
         """Delete a nutrition log entry by ID.
         
         Uses the Garmin nutrition-service API endpoint to delete a food log entry.
         
+        Based on Garmin Connect API patterns:
+        - GET  /nutrition-service/food/logs/{date} - list logs
+        - PUT  /nutrition-service/food/logs/quickAdd - add log (from ha-garmin)
+        - DELETE /nutrition-service/food/logs/{logId} - delete log (inferred)
+        
+        The logId is a 32-character hex string like '1ecbb709157543948c25eafa2c74edc7'
+        from the loggedFoods[].logId field in the API response.
+        
         Args:
-            log_id: The Garmin food log ID to delete (from foodLog.foodLogId)
+            log_id: The Garmin food log ID (32-char hex string from loggedFoods[].logId)
             
         Returns:
             True if deletion succeeded
         """
         try:
-            # Delete a food log entry
-            # Endpoint: DELETE /nutrition-service/food/logs/{foodLogId}
+            # Delete a food log entry using the standard REST pattern
+            # Endpoint: DELETE /nutrition-service/food/logs/{logId}
             from ha_garmin.client import NUTRITION_LOGS_URL
             
             # NUTRITION_LOGS_URL is https://connect.garmin.com/gc-api/nutrition-service/food/logs
-            # To delete: DELETE /nutrition-service/food/logs/{foodLogId}
+            # To delete: DELETE /nutrition-service/food/logs/{logId}
             url = f"{NUTRITION_LOGS_URL}/{log_id}"
             
-            # Access the internal _request method
-            await self._client._request("DELETE", url)
+            # Use the internal _delete_request method which exists in ha-garmin
+            await self._client._delete_request(url)
             logger.info("Deleted Garmin food log %s", log_id)
             return True
             
