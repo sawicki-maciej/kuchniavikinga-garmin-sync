@@ -473,6 +473,137 @@ cmd_test() {
         --freshness=5m
 }
 
+# Resync meals for a specific date (delete from Garmin and re-log with correct macros)
+cmd_resync() {
+    check_gcloud
+    
+    local resync_date=""
+    local dry_run="false"
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --date)
+                resync_date="$2"
+                shift 2
+                ;;
+            --dry-run)
+                dry_run="true"
+                shift
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Usage: $0 resync --date YYYY-MM-DD [--dry-run]"
+                exit 1
+                ;;
+        esac
+    done
+    
+    if [[ -z "$resync_date" ]]; then
+        log_error "--date is required for resync"
+        echo "Usage: $0 resync --date YYYY-MM-DD [--dry-run]"
+        exit 1
+    fi
+    
+    # Validate date format
+    if ! [[ "$resync_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        log_error "Invalid date format. Expected YYYY-MM-DD, got: $resync_date"
+        exit 1
+    fi
+    
+    log_info "Resyncing meals for date: $resync_date"
+    if [[ "$dry_run" == "true" ]]; then
+        log_warn "DRY RUN mode - will not make actual changes"
+    else
+        log_warn "This will delete and re-log all meals for $resync_date"
+        read -p "Continue? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_info "Cancelled"
+            exit 0
+        fi
+    fi
+    
+    log_info "Executing resync job..."
+    
+    # Build env vars for resync mode
+    local env_vars="STATE_BUCKET=$STATE_BUCKET,RESYNC_DATE=$resync_date"
+    if [[ "$dry_run" == "true" ]]; then
+        env_vars="$env_vars,DRY_RUN=true"
+    fi
+    
+    # Execute the job with RESYNC_DATE
+    local execution_name
+    execution_name=$(gcloud run jobs execute "$JOB_NAME" \
+        --region="$REGION" \
+        --project="$PROJECT_ID" \
+        --update-env-vars="$env_vars" \
+        --format="value(metadata.name)" 2>&1 | tail -1)
+    
+    if [[ -z "$execution_name" ]]; then
+        log_error "Failed to execute resync job"
+        exit 1
+    fi
+    
+    log_info "Resync job execution started: $execution_name"
+    log_info "Waiting for completion..."
+    
+    # Wait for completion (timeout after 5 minutes)
+    local timeout=300
+    local elapsed=0
+    
+    while [[ $elapsed -lt $timeout ]]; do
+        local exec_info
+        exec_info=$(gcloud run jobs executions describe "$execution_name" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --format="json" 2>/dev/null || echo "{}")
+        
+        local completed
+        completed=$(echo "$exec_info" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status', {}).get('completionTime', ''))" 2>/dev/null || echo "")
+        
+        if [[ -n "$completed" ]]; then
+            local succeeded
+            succeeded=$(echo "$exec_info" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status', {}).get('succeededCount', 0))" 2>/dev/null || echo "0")
+            
+            local failed
+            failed=$(echo "$exec_info" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status', {}).get('failedCount', 0))" 2>/dev/null || echo "0")
+            
+            if [[ "$succeeded" == "1" ]]; then
+                log_info "✓ Resync job completed successfully"
+                break
+            elif [[ "$failed" == "1" ]]; then
+                log_error "✗ Resync job execution failed"
+                log_info "Fetching logs..."
+                cmd_logs
+                exit 1
+            else
+                log_error "✗ Resync job completed with unexpected status (succeeded=$succeeded, failed=$failed)"
+                log_info "Fetching logs..."
+                cmd_logs
+                exit 1
+            fi
+        fi
+        
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    
+    if [[ $elapsed -ge $timeout ]]; then
+        log_warn "Timeout waiting for resync job completion"
+        exit 1
+    fi
+    
+    log_info ""
+    log_info "Fetching execution logs..."
+    gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=$JOB_NAME AND resource.labels.location=$REGION" \
+        --project="$PROJECT_ID" \
+        --limit=50 \
+        --format="table(timestamp,textPayload)" \
+        --order=asc \
+        --freshness=5m
+}
+
 # Show recent job logs
 cmd_logs() {
     check_gcloud
@@ -617,6 +748,10 @@ main() {
             shift
             cmd_test "$@"
             ;;
+        resync)
+            shift
+            cmd_resync "$@"
+            ;;
         logs)
             cmd_logs
             ;;
@@ -637,6 +772,8 @@ main() {
             echo "  test            Run job once (live mode)"
             echo "  test --dry-run  Run job once with DRY_RUN=true"
             echo "  test --date YYYY-MM-DD  Run job for specific date"
+            echo "  resync --date YYYY-MM-DD  Resync (delete & re-log) all meals for a date"
+            echo "  resync --date YYYY-MM-DD --dry-run  Preview what would be resynced"
             echo "  logs            Show recent execution logs"
             echo "  destroy         Remove all infrastructure (with confirmation)"
             echo ""

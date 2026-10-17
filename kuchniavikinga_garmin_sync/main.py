@@ -32,9 +32,62 @@ async def main() -> int:
     setup_logging(log_level)
 
     logger = logging.getLogger(__name__)
-    logger.info("Vikinga → Garmin Connect Sync starting")
 
     try:
+        # Check if this is a resync operation
+        resync_date_str = get_env_var("RESYNC_DATE", required=False)
+        
+        if resync_date_str:
+            # RESYNC MODE
+            from datetime import datetime
+            from .resync import ResyncService
+            from .dietly_client import DietlyClient
+            from .garmin_client import GarminConnectClient
+            from .state import SyncState
+            
+            logger.info("RESYNC MODE: %s", resync_date_str)
+            
+            try:
+                resync_date = datetime.strptime(resync_date_str, "%Y-%m-%d").date()
+            except ValueError as e:
+                logger.error("Invalid RESYNC_DATE format (expected YYYY-MM-DD): %s", e)
+                return 1
+            
+            # Load configuration
+            vikinga_email = get_env_var("VIKINGA_EMAIL")
+            vikinga_password = get_env_var("VIKINGA_PASSWORD")
+            state_bucket = get_env_var("STATE_BUCKET", required=False)
+            dry_run = get_env_var("DRY_RUN", required=False) == "true"
+            dump_raw = get_env_var("DUMP_RAW", required=False) == "true"
+            
+            # Initialize services
+            state = SyncState(bucket_name=state_bucket)
+            state.load()
+            
+            async with DietlyClient(vikinga_email, vikinga_password, dump_raw=dump_raw) as dietly:
+                async with GarminConnectClient() as garmin:
+                    resync_service = ResyncService(
+                        dietly_client=dietly,
+                        garmin_client=garmin,
+                        state=state,
+                        dry_run=dry_run,
+                    )
+                    
+                    result = await resync_service.resync_date(resync_date)
+                    
+                    # Log results
+                    logger.info("Resync results: %s", result)
+                    
+                    if result["skipped"] > 0:
+                        logger.warning("Resync completed with some skipped entries")
+                        return 1
+                    
+                    logger.info("Resync completed successfully")
+                    return 0
+        
+        # NORMAL SYNC MODE
+        logger.info("Vikinga → Garmin Connect Sync starting")
+        
         # Load configuration from environment
         vikinga_email = get_env_var("VIKINGA_EMAIL")
         vikinga_password = get_env_var("VIKINGA_PASSWORD")
