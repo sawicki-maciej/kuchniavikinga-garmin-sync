@@ -16,21 +16,19 @@ async def test_resync_with_stored_ids():
     dietly_mock = AsyncMock()
     garmin_mock = AsyncMock()
     
-    # Create state with stored meals
+    # Create state with stored meals (production format: "<slot> - <dish>")
     state = SyncState(bucket_name=None)
     state._state = {"synced_meals": {
         "2026-10-16:Śniadanie:abc12345": {
             "delivery_date": "2026-10-16",
-            "meal_name": "Śniadanie",
-            "dish_name": "Test Breakfast",
+            "meal_name": "Śniadanie - Test Breakfast Dish",
             "calories": 400,
             "synced_at": "2026-10-16",
             "garmin_log_id": 12345
         },
         "2026-10-16:Obiad:def67890": {
             "delivery_date": "2026-10-16",
-            "meal_name": "Obiad",
-            "dish_name": "Test Lunch",
+            "meal_name": "Obiad - Test Lunch Dish",
             "calories": 600,
             "synced_at": "2026-10-16",
             "garmin_log_id": 67890
@@ -44,13 +42,13 @@ async def test_resync_with_stored_ids():
             return [
                 {
                     "logId": 12345,
-                    "name": "KV: Test Breakfast",
+                    "name": "KV: Test Breakfast Dish",
                     "mealSlotName": "BREAKFAST",
                     "calories": 400
                 },
                 {
                     "logId": 67890,
-                    "name": "KV: Test Lunch",
+                    "name": "KV: Test Lunch Dish",
                     "mealSlotName": "LUNCH",
                     "calories": 600
                 }
@@ -68,7 +66,7 @@ async def test_resync_with_stored_ids():
         DeliveredMeal(
             delivery_date=date(2026, 10, 16),
             meal_name="Śniadanie",
-            dish_name="Test Breakfast",
+            dish_name="Test Breakfast Dish",
             nutrition=NutritionInfo(calories=400, protein=20, carbs=50, fat=10),
             delivery_id=1,
             meal_id=1
@@ -76,7 +74,7 @@ async def test_resync_with_stored_ids():
         DeliveredMeal(
             delivery_date=date(2026, 10, 16),
             meal_name="Obiad",
-            dish_name="Test Lunch",
+            dish_name="Test Lunch Dish",
             nutrition=NutritionInfo(calories=600, protein=30, carbs=70, fat=15),
             delivery_id=1,
             meal_id=2
@@ -114,8 +112,7 @@ async def test_resync_dry_run():
     state._state = {"synced_meals": {
         "2026-10-16:Śniadanie:abc12345": {
             "delivery_date": "2026-10-16",
-            "meal_name": "Śniadanie",
-            "dish_name": "Test Meal",
+            "meal_name": "Śniadanie - Test Breakfast Meal",
             "calories": 400,
             "synced_at": "2026-10-16",
             "garmin_log_id": 12345
@@ -126,7 +123,7 @@ async def test_resync_dry_run():
     garmin_mock.list_nutrition_logs = AsyncMock(return_value=[
         {
             "logId": 12345,
-            "name": "KV: Test Meal",
+            "name": "KV: Test Breakfast Meal",
             "mealSlotName": "BREAKFAST",
             "calories": 400
         }
@@ -136,7 +133,7 @@ async def test_resync_dry_run():
         DeliveredMeal(
             delivery_date=date(2026, 10, 16),
             meal_name="Śniadanie",
-            dish_name="Test Meal",
+            dish_name="Test Breakfast Meal",
             nutrition=NutritionInfo(calories=400, protein=20, carbs=50, fat=10),
             delivery_id=1,
             meal_id=1
@@ -324,6 +321,160 @@ async def test_resync_real_five_meal_structure():
     
     # Verify all 5 were re-logged
     assert garmin_mock.log_meal.call_count == 5
+
+
+@pytest.mark.asyncio
+async def test_resync_production_matching_regression():
+    """Regression test with exact production state/Garmin pairs from 2026-10-16.
+    
+    Production issue: state meal_name is '<slot> - <dish>' format, no calories stored.
+    This test validates the fixed matching logic handles this correctly.
+    """
+    dietly_mock = AsyncMock()
+    garmin_mock = AsyncMock()
+    
+    # Real production state: meal_name is "<slot> - <dish>", calories are 0
+    state = SyncState(bucket_name=None)
+    state._state = {"synced_meals": {
+        "2026-10-16:key1": {
+            "delivery_date": "2026-10-16",
+            "meal_name": "Śniadanie - Gofr czekoladowy, jogurt malin",
+            "calories": 0,
+            "synced_at": "2026-10-16",
+        },
+        "2026-10-16:key2": {
+            "delivery_date": "2026-10-16",
+            "meal_name": "II śniadanie - Sałatka z grillowanym kurczaki",
+            "calories": 0,
+            "synced_at": "2026-10-16",
+        },
+        "2026-10-16:key3": {
+            "delivery_date": "2026-10-16",
+            "meal_name": "Obiad - Grillowane krewetki, risotto m",
+            "calories": 0,
+            "synced_at": "2026-10-16",
+        },
+        "2026-10-16:key4": {
+            "delivery_date": "2026-10-16",
+            "meal_name": "Podwieczorek - Twarożek ananasowy",
+            "calories": 0,
+            "synced_at": "2026-10-16",
+        },
+        "2026-10-16:key5": {
+            "delivery_date": "2026-10-16",
+            "meal_name": "Kolacja - Pierogi ze szpinakiem i serem,",
+            "calories": 0,
+            "synced_at": "2026-10-16",
+        },
+    }}
+    
+    # Real production Garmin entries
+    async def list_nutrition_logs_side_effect(target_date, dump_raw=False):
+        if garmin_mock.list_nutrition_logs.call_count == 1:
+            # First call: return production entries
+            return [
+                {
+                    "logId": "prod_id_1",
+                    "name": "KV: Gofr czekoladowy, jogurt malinowy, winog",
+                    "mealSlotName": "BREAKFAST",
+                    "calories": 452,
+                },
+                {
+                    "logId": "prod_id_2",
+                    "name": "KV: Sałatka z grillowanym kurczakiem",
+                    "mealSlotName": "SNACKS",
+                    "calories": 380,
+                },
+                {
+                    "logId": "prod_id_3",
+                    "name": "KV: Grillowane krewetki, risotto mushroom",
+                    "mealSlotName": "LUNCH",
+                    "calories": 620,
+                },
+                {
+                    "logId": "prod_id_4",
+                    "name": "KV: Twarożek ananasowy",
+                    "mealSlotName": "SNACKS",
+                    "calories": 290,
+                },
+                {
+                    "logId": "prod_id_5",
+                    "name": "KV: Pierogi ze szpinakiem i serem, cebulka",
+                    "mealSlotName": "DINNER",
+                    "calories": 540,
+                },
+            ]
+        else:
+            # Second call (verification): return empty (all deleted)
+            return []
+    
+    garmin_mock.list_nutrition_logs = AsyncMock(side_effect=list_nutrition_logs_side_effect)
+    garmin_mock.delete_nutrition_log = AsyncMock(return_value=True)
+    garmin_mock.log_meal = AsyncMock(return_value={"logId": "new_log_id"})
+    
+    # Mock fresh meals
+    fresh_meals = [
+        DeliveredMeal(
+            delivery_date=date(2026, 10, 16),
+            meal_name="Śniadanie",
+            dish_name="Gofr czekoladowy, jogurt malinowy, winogrona",
+            nutrition=NutritionInfo(calories=452, protein=20, carbs=50, fat=10),
+            delivery_id=1,
+            meal_id=1,
+        ),
+        DeliveredMeal(
+            delivery_date=date(2026, 10, 16),
+            meal_name="II Śniadanie",
+            dish_name="Sałatka z grillowanym kurczakiem",
+            nutrition=NutritionInfo(calories=380, protein=25, carbs=30, fat=12),
+            delivery_id=1,
+            meal_id=2,
+        ),
+        DeliveredMeal(
+            delivery_date=date(2026, 10, 16),
+            meal_name="Obiad",
+            dish_name="Grillowane krewetki, risotto mushroom",
+            nutrition=NutritionInfo(calories=620, protein=35, carbs=70, fat=18),
+            delivery_id=1,
+            meal_id=3,
+        ),
+        DeliveredMeal(
+            delivery_date=date(2026, 10, 16),
+            meal_name="Podwieczorek",
+            dish_name="Twarożek ananasowy",
+            nutrition=NutritionInfo(calories=290, protein=15, carbs=25, fat=8),
+            delivery_id=1,
+            meal_id=4,
+        ),
+        DeliveredMeal(
+            delivery_date=date(2026, 10, 16),
+            meal_name="Kolacja",
+            dish_name="Pierogi ze szpinakiem i serem, cebulka",
+            nutrition=NutritionInfo(calories=540, protein=20, carbs=60, fat=22),
+            delivery_id=1,
+            meal_id=5,
+        ),
+    ]
+    dietly_mock.get_delivered_meals = AsyncMock(return_value=fresh_meals)
+    
+    resync = ResyncService(dietly_mock, garmin_mock, state, dry_run=False)
+    result = await resync.resync_date(date(2026, 10, 16))
+    
+    # Should match all 5 entries despite:
+    # - Different truncation in state vs Garmin
+    # - Missing calories in state (0)
+    # - Two entries in SNACKS slot with different dishes
+    assert result["deleted"] == 5, f"Expected 5 deletions, got {result['deleted']}"
+    assert result["relogged"] == 5, f"Expected 5 relogs, got {result['relogged']}"
+    assert result["skipped"] == 0, f"Expected 0 skipped, got {result['skipped']}"
+    
+    # Verify all 5 were deleted
+    assert garmin_mock.delete_nutrition_log.call_count == 5
+    garmin_mock.delete_nutrition_log.assert_any_call("prod_id_1")
+    garmin_mock.delete_nutrition_log.assert_any_call("prod_id_2")
+    garmin_mock.delete_nutrition_log.assert_any_call("prod_id_3")
+    garmin_mock.delete_nutrition_log.assert_any_call("prod_id_4")
+    garmin_mock.delete_nutrition_log.assert_any_call("prod_id_5")
 
 
 @pytest.mark.asyncio
