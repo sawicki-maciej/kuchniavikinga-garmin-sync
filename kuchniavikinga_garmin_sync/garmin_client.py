@@ -274,23 +274,48 @@ class GarminConnectClient:
                 )
             
             # Extract food logs from the response
-            # Real structure: {"mealDetails": [{"loggedFoods": [...]}]}
-            # Also support old guessed structure: {"mealDetails": [{"foodLogs": [...]}]}
+            # Real structure: {"mealDetails": [{"meal": {"mealName": "BREAKFAST"}, "loggedFoods": [...]}]}
+            # Each logged food needs to be enriched with the parent meal's mealName (slot)
             logs = []
             if isinstance(data, dict):
                 meal_details = data.get("mealDetails", [])
                 if isinstance(meal_details, list):
                     for meal_detail in meal_details:
                         if isinstance(meal_detail, dict):
+                            # Extract parent meal info
+                            meal_info = meal_detail.get("meal", {})
+                            meal_slot_name = meal_info.get("mealName") if isinstance(meal_info, dict) else None
+                            
                             # Try real structure first (loggedFoods)
                             logged_foods = meal_detail.get("loggedFoods")
                             if logged_foods and isinstance(logged_foods, list):
-                                logs.extend(logged_foods)
+                                # Enrich each food log with parent meal slot
+                                for food_log in logged_foods:
+                                    if isinstance(food_log, dict):
+                                        # Parse the real structure
+                                        food_meta = food_log.get("foodMetaData", {})
+                                        nutrition_content = food_log.get("nutritionContent", {})
+                                        
+                                        enriched_log = {
+                                            "logId": food_log.get("logId"),
+                                            "name": food_meta.get("foodName") if isinstance(food_meta, dict) else "",
+                                            "calories": nutrition_content.get("calories") if isinstance(nutrition_content, dict) else None,
+                                            "mealSlotName": meal_slot_name,
+                                            # Keep the raw entry for any other needs
+                                            "_raw": food_log,
+                                        }
+                                        logs.append(enriched_log)
                             else:
                                 # Fallback to old guessed structure (foodLogs)
                                 food_logs = meal_detail.get("foodLogs")
                                 if food_logs and isinstance(food_logs, list):
-                                    logs.extend(food_logs)
+                                    for food_log in food_logs:
+                                        if isinstance(food_log, dict):
+                                            enriched_log = {
+                                                **food_log,
+                                                "mealSlotName": meal_slot_name,
+                                            }
+                                            logs.append(enriched_log)
                 
                 # If we didn't find logs, log the structure
                 if not logs and data:
@@ -403,3 +428,37 @@ class GarminConnectClient:
         # Default to lunch time if unknown
         logger.warning("Unknown meal name '%s', defaulting to 13:00:00", meal_name)
         return "13:00:00"
+    
+    @staticmethod
+    def polish_meal_to_garmin_slot(meal_name: str) -> str:
+        """Map Polish meal name to Garmin meal slot name.
+        
+        Maps based on typical meal times:
+        - Śniadanie → BREAKFAST
+        - II Śniadanie → SNACKS (mid-morning)
+        - Obiad → LUNCH
+        - Podwieczorek → SNACKS (afternoon)
+        - Kolacja → DINNER
+        
+        Args:
+            meal_name: Polish meal name (e.g., "Śniadanie", "II Śniadanie")
+            
+        Returns:
+            Garmin meal slot name (BREAKFAST, LUNCH, DINNER, SNACKS)
+        """
+        meal_name_lower = meal_name.lower()
+        
+        # Check longer/more specific names first
+        if "ii śniadanie" in meal_name_lower or "ii sniadanie" in meal_name_lower:
+            return "SNACKS"
+        elif "śniadanie" in meal_name_lower or "sniadanie" in meal_name_lower:
+            return "BREAKFAST"
+        elif "obiad" in meal_name_lower:
+            return "LUNCH"
+        elif "podwieczorek" in meal_name_lower:
+            return "SNACKS"
+        elif "kolacja" in meal_name_lower:
+            return "DINNER"
+        
+        # Default to LUNCH if unknown
+        return "LUNCH"
