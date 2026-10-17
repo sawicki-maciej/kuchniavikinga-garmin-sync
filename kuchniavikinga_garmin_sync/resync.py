@@ -33,6 +33,58 @@ class ResyncService:
         self.state = state
         self.dry_run = dry_run
 
+    @staticmethod
+    def _normalize_dish_name(name: str) -> str:
+        """Normalize a dish name for comparison.
+        
+        - Convert to lowercase (casefold)
+        - Collapse multiple whitespace to single space
+        - Strip trailing punctuation (comma, period)
+        
+        Args:
+            name: The dish name to normalize
+            
+        Returns:
+            Normalized dish name
+        """
+        import re
+        # Casefold for case-insensitive comparison
+        normalized = name.casefold()
+        # Collapse whitespace
+        normalized = re.sub(r'\s+', ' ', normalized)
+        # Strip leading/trailing whitespace
+        normalized = normalized.strip()
+        # Strip trailing punctuation
+        normalized = normalized.rstrip('.,;:')
+        return normalized
+
+    @staticmethod
+    def _dish_names_match(name1: str, name2: str, min_chars: int = 10) -> bool:
+        """Check if two normalized dish names match by prefix.
+        
+        One must start with the other, over min(len) characters, with minimum of min_chars.
+        
+        Args:
+            name1: First normalized dish name
+            name2: Second normalized dish name
+            min_chars: Minimum number of characters to compare
+            
+        Returns:
+            True if names match by prefix
+        """
+        if not name1 or not name2:
+            return False
+        
+        # Get the shorter length
+        min_len = min(len(name1), len(name2))
+        
+        # Must have at least min_chars to compare
+        if min_len < min_chars:
+            return False
+        
+        # Compare over min_len characters
+        return name1[:min_len] == name2[:min_len]
+
     async def resync_date(self, target_date: date) -> dict[str, int]:
         """Resync all meals for a specific date.
 
@@ -289,19 +341,26 @@ class ResyncService:
 
             logger.info("Found %d entries with 'KV:' prefix", len(kv_entries))
 
-            # Match state entries to Garmin entries using slot + dish name + calories
+            # Match state entries to Garmin entries using slot + normalized dish name
             # Require unambiguous 1:1 mapping
             for state_entry in state_entries:
                 state_meal_name = state_entry["meal_name"]
-                state_dish_name = state_entry["dish_name"]
                 state_calories = state_entry["calories"]
                 
-                # Map state meal name to Garmin slot
-                expected_slot = GarminConnectClient.polish_meal_to_garmin_slot(state_meal_name)
+                # Parse state meal_name: format is "<slot> - <dish>" (e.g., "Śniadanie - Gofr czekoladowy...")
+                # Split on first " - " to extract slot name and dish name
+                if " - " in state_meal_name:
+                    state_slot_name, state_dish_name = state_meal_name.split(" - ", 1)
+                else:
+                    # Fallback: use meal_name as dish if no separator
+                    state_slot_name = state_meal_name
+                    state_dish_name = state_entry.get("dish_name", state_meal_name)
                 
-                # Build expected Garmin name: "KV: <dish_name>"
-                # Garmin truncates at ~44 chars
-                expected_name_prefix = f"KV: {state_dish_name}"[:44]
+                # Map state slot name to Garmin slot
+                expected_slot = GarminConnectClient.polish_meal_to_garmin_slot(state_slot_name)
+                
+                # Normalize state dish name for comparison
+                state_dish_normalized = self._normalize_dish_name(state_dish_name)
 
                 # Find matching Garmin entries
                 candidates = []
@@ -310,10 +369,21 @@ class ResyncService:
                     garmin_slot = garmin_entry["mealSlotName"]
                     garmin_calories = garmin_entry["calories"] or 0
 
-                    # Match criteria: slot, name prefix (first 40 chars), and calories (±5)
+                    # Extract dish name from Garmin (strip "KV: " prefix)
+                    garmin_dish = garmin_name[4:] if garmin_name.startswith("KV: ") else garmin_name
+                    garmin_dish_normalized = self._normalize_dish_name(garmin_dish)
+
+                    # Match criteria:
+                    # 1. Slot must match
+                    # 2. Dish names must match by normalized prefix (min 10 chars)
+                    # 3. Skip calorie check if state has no calories (0 or missing)
                     slot_match = (garmin_slot == expected_slot)
-                    name_match = garmin_name.startswith(expected_name_prefix[:40])
-                    calorie_match = abs(garmin_calories - state_calories) < 5
+                    name_match = self._dish_names_match(state_dish_normalized, garmin_dish_normalized)
+                    
+                    # Only check calories if state has them
+                    calorie_match = True
+                    if state_calories and state_calories > 0:
+                        calorie_match = abs(garmin_calories - state_calories) < 5
 
                     if slot_match and name_match and calorie_match:
                         candidates.append(garmin_entry)
@@ -328,31 +398,28 @@ class ResyncService:
                         "garmin_slot": garmin_entry["mealSlotName"],
                         "meal_key": state_entry["meal_key"],
                         "meal_name": state_entry["meal_name"],
-                        "dish_name": state_entry["dish_name"],
+                        "dish_name": state_dish_name,
                     })
                     logger.info(
-                        "Matched: state '%s - %s' -> Garmin '%s' / %s (ID: %s)",
-                        state_meal_name,
-                        state_dish_name[:30],
+                        "Matched: state '%s' -> Garmin '%s' / %s (ID: %s)",
+                        state_meal_name[:50],
                         garmin_entry["mealSlotName"],
                         garmin_entry["name"][:50],
                         garmin_entry["logId"]
                     )
                 elif len(candidates) == 0:
                     logger.warning(
-                        "No Garmin match for state entry: %s - %s (expected slot: %s, cal: %d)",
-                        state_meal_name,
-                        state_dish_name[:30],
+                        "No Garmin match for state entry: %s (expected slot: %s, cal: %d)",
+                        state_meal_name[:50],
                         expected_slot,
                         state_calories
                     )
                 else:
                     # Ambiguous: multiple candidates
                     logger.error(
-                        "AMBIGUOUS: %d Garmin matches for state entry: %s - %s",
+                        "AMBIGUOUS: %d Garmin matches for state entry: %s",
                         len(candidates),
-                        state_meal_name,
-                        state_dish_name[:30]
+                        state_meal_name[:50]
                     )
                     for candidate in candidates:
                         logger.error("  - %s / %s (ID: %s)", candidate["mealSlotName"], candidate["name"][:50], candidate["logId"])
