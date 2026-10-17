@@ -53,14 +53,26 @@ class GarminConnectClient:
             try:
                 await self._add_secret_version()
                 logger.info("Refreshed tokens uploaded successfully")
+                
+                # Only clean up local token file after successful save
+                try:
+                    self.local_token_path.unlink(missing_ok=True)
+                    logger.debug("Cleaned up local token file")
+                except Exception as e:
+                    logger.debug("Failed to clean up local token file: %s", e)
+                    
             except Exception as e:
-                logger.error("Failed to upload refreshed tokens: %s", e)
-        
-        # Clean up local token file
-        try:
-            self.local_token_path.unlink(missing_ok=True)
-        except Exception as e:
-            logger.debug("Failed to clean up local token file: %s", e)
+                logger.error("FATAL: Failed to upload refreshed tokens to Secret Manager: %s", e)
+                logger.error("Local token file preserved at: %s", self.local_token_path)
+                # Fail the job - token refresh must be persisted
+                raise RuntimeError(f"Failed to persist refreshed Garmin tokens: {e}") from e
+        else:
+            # Clean up local token file if no changes were made
+            try:
+                self.local_token_path.unlink(missing_ok=True)
+                logger.debug("Cleaned up local token file")
+            except Exception as e:
+                logger.debug("Failed to clean up local token file: %s", e)
 
     async def authenticate(self) -> None:
         """Authenticate with Garmin Connect using tokens from Secret Manager.

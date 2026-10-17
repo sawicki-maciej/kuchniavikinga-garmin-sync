@@ -154,7 +154,10 @@ grant_permissions() {
     
     # Grant storage.objectUser on state bucket
     log_info "  Granting storage.objectUser on bucket..."
-    gsutil iam ch "serviceAccount:${SERVICE_ACCOUNT}:objectUser" "gs://${STATE_BUCKET}" 2>/dev/null || true
+    gcloud storage buckets add-iam-policy-binding "gs://${STATE_BUCKET}" \
+        --member="serviceAccount:${SERVICE_ACCOUNT}" \
+        --role="roles/storage.objectUser" \
+        --project="$PROJECT_ID"
     
     # Grant secretAccessor on credential secrets
     local secrets=(
@@ -168,8 +171,7 @@ grant_permissions() {
             --member="serviceAccount:${SERVICE_ACCOUNT}" \
             --role="roles/secretmanager.secretAccessor" \
             --project="$PROJECT_ID" \
-            --condition=None \
-            >/dev/null 2>&1 || true
+            --condition=None
     done
     
     # Grant secretAccessor and secretVersionAdder on Garmin tokens secret
@@ -178,26 +180,16 @@ grant_permissions() {
         --member="serviceAccount:${SERVICE_ACCOUNT}" \
         --role="roles/secretmanager.secretAccessor" \
         --project="$PROJECT_ID" \
-        --condition=None \
-        >/dev/null 2>&1 || true
+        --condition=None
     
     log_info "  Granting secretVersionAdder on $SECRET_GARMIN_TOKENS (for token refresh)..."
     gcloud secrets add-iam-policy-binding "$SECRET_GARMIN_TOKENS" \
         --member="serviceAccount:${SERVICE_ACCOUNT}" \
         --role="roles/secretmanager.secretVersionAdder" \
         --project="$PROJECT_ID" \
-        --condition=None \
-        >/dev/null 2>&1 || true
+        --condition=None
     
-    # Grant run.invoker for Cloud Scheduler
-    log_info "  Ensuring service account has run.invoker role..."
-    gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-        --member="serviceAccount:${SERVICE_ACCOUNT}" \
-        --role="roles/run.invoker" \
-        --condition=None \
-        >/dev/null 2>&1 || true
-    
-    log_info "  ✓ Permissions granted"
+    log_info "  ✓ Permissions granted (job-level run.invoker will be granted after job creation)"
 }
 
 
@@ -244,7 +236,7 @@ deploy_job() {
             --task-timeout=30m \
             --memory=512Mi \
             --cpu=1 \
-            --set-env-vars="STATE_BUCKET=${STATE_BUCKET},SYNC_DAYS_BACK=1,DRY_RUN=false,LOG_LEVEL=INFO" \
+            --set-env-vars="STATE_BUCKET=${STATE_BUCKET},SYNC_DAYS_BACK=3,DRY_RUN=false,LOG_LEVEL=INFO" \
             $secret_args \
             --project="$PROJECT_ID"
     else
@@ -258,10 +250,18 @@ deploy_job() {
             --task-timeout=30m \
             --memory=512Mi \
             --cpu=1 \
-            --set-env-vars="STATE_BUCKET=${STATE_BUCKET},SYNC_DAYS_BACK=1,DRY_RUN=false,LOG_LEVEL=INFO" \
+            --set-env-vars="STATE_BUCKET=${STATE_BUCKET},SYNC_DAYS_BACK=3,DRY_RUN=false,LOG_LEVEL=INFO" \
             $secret_args \
             --project="$PROJECT_ID"
     fi
+    
+    # Grant run.invoker on this job (for Cloud Scheduler)
+    log_info "  Granting run.invoker on job..."
+    gcloud run jobs add-iam-policy-binding "$JOB_NAME" \
+        --member="serviceAccount:${SERVICE_ACCOUNT}" \
+        --role="roles/run.invoker" \
+        --region="$REGION" \
+        --project="$PROJECT_ID"
     
     log_info "  ✓ Cloud Run Job deployed"
 }
@@ -689,8 +689,16 @@ cmd_destroy() {
             --quiet
     fi
     
-    # Delete Cloud Run Job
+    # Delete Cloud Run Job (and revoke IAM first)
     if gcloud run jobs describe "$JOB_NAME" --region="$REGION" --project="$PROJECT_ID" &>/dev/null; then
+        log_info "  Revoking run.invoker from job..."
+        gcloud run jobs remove-iam-policy-binding "$JOB_NAME" \
+            --member="serviceAccount:${SERVICE_ACCOUNT}" \
+            --role="roles/run.invoker" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --quiet || log_warn "    Failed to revoke (may not exist)"
+        
         log_info "  Deleting Cloud Run Job..."
         gcloud run jobs delete "$JOB_NAME" \
             --region="$REGION" \

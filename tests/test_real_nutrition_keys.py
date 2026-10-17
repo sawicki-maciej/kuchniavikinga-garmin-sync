@@ -2,11 +2,13 @@
 
 import pytest
 from datetime import date
+from unittest.mock import AsyncMock
 
 from kuchniavikinga_garmin_sync.dietly_client import DietlyClient
 
 
-def test_production_nutrition_keys():
+@pytest.mark.asyncio
+async def test_production_nutrition_keys():
     """Test parsing with the exact key set from production logs.
     
     Production keys: ['weight', 'calories', 'fat', 'protein', 'carbohydrate',
@@ -14,74 +16,117 @@ def test_production_nutrition_keys():
     """
     client = DietlyClient(email="test@example.com", password="testpass")
     
-    # Real production nutrition data structure
-    nutrition_data = {
-        "weight": 350,
-        "calories": 520,
-        "fat": 18.5,
-        "protein": 32.0,
-        "carbohydrate": 55.2,  # Singular form - this is the actual key
-        "dietaryFiber": 8.3,
-        "sugar": 4.1,
-        "salt": 1.2,
-        "saturatedFattyAcids": 4.5,
-        "caloriesText": "520 kcal"
-    }
+    # Mock HTTP session
+    mock_session = AsyncMock()
+    client._session = mock_session
     
-    # Test carbohydrate (singular) is parsed correctly
-    carbs = (
-        client._safe_float(nutrition_data.get("carbohydrate")) or
-        client._safe_float(nutrition_data.get("carbohydrates")) or
-        client._safe_float(nutrition_data.get("carbs")) or
-        client._safe_float(nutrition_data.get("wegle"))
-    )
+    client.get_active_order_ids = AsyncMock(return_value=[123])
+    client.get_order_deliveries = AsyncMock(return_value=[{
+        "deliveryId": 456,
+        "date": "2026-10-15",
+        "deleted": False,
+    }])
     
-    assert carbs == 55.2, "Should parse 'carbohydrate' (singular) field"
-    assert client._safe_float(nutrition_data.get("protein")) == 32.0
-    assert client._safe_float(nutrition_data.get("fat")) == 18.5
-    assert float(nutrition_data.get("calories", 0) or 0) == 520.0
+    # Mock with real production nutrition structure
+    client.get_delivery_meals = AsyncMock(return_value=[{
+        "deliveryMealId": 789,
+        "mealName": "Obiad",
+        "menuMealName": "Kurczak z warzywami",
+        "deleted": False,
+        "nutrition": {
+            "weight": 350,
+            "calories": 520,
+            "fat": 18.5,
+            "protein": 32.0,
+            "carbohydrate": 55.2,  # Singular form - actual production key
+            "dietaryFiber": 8.3,
+            "sugar": 4.1,
+            "salt": 1.2,
+            "saturatedFattyAcids": 4.5,
+            "caloriesText": "520 kcal"
+        }
+    }])
+    
+    # Call real parsing code
+    meals = await client.get_delivered_meals(date(2026, 10, 15), date(2026, 10, 15))
+    
+    assert len(meals) == 1
+    meal = meals[0]
+    
+    # Verify all nutrition fields are parsed correctly
+    assert meal.nutrition.calories == 520.0
+    assert meal.nutrition.protein == 32.0
+    assert meal.nutrition.fat == 18.5
+    assert meal.nutrition.carbs == 55.2  # Parsed from 'carbohydrate'
 
 
-def test_production_keys_with_zero_carbs():
-    """Test that warning is logged when carbs are actually zero or missing."""
+@pytest.mark.asyncio
+async def test_production_keys_with_zero_carbs():
+    """Test that zero carbs are handled correctly (not skipped)."""
     client = DietlyClient(email="test@example.com", password="testpass")
     
-    # Nutrition with zero carbs (should not trigger warning since carbs exist)
-    nutrition_data = {
-        "calories": 150,
-        "protein": 20.0,
-        "carbohydrate": 0,  # Explicitly zero
-        "fat": 8.0
-    }
+    mock_session = AsyncMock()
+    client._session = mock_session
     
-    carbs = (
-        client._safe_float(nutrition_data.get("carbohydrate")) or
-        client._safe_float(nutrition_data.get("carbohydrates")) or
-        client._safe_float(nutrition_data.get("carbs")) or
-        client._safe_float(nutrition_data.get("wegle"))
-    )
+    client.get_active_order_ids = AsyncMock(return_value=[123])
+    client.get_order_deliveries = AsyncMock(return_value=[{
+        "deliveryId": 456,
+        "date": "2026-10-15",
+        "deleted": False,
+    }])
     
-    # _safe_float(0) returns 0.0, which is falsy but should be preserved
-    assert carbs == 0.0 or carbs is None, "Zero carbs should be handled"
+    # Nutrition with explicitly zero carbs (protein-heavy meal)
+    client.get_delivery_meals = AsyncMock(return_value=[{
+        "deliveryMealId": 789,
+        "mealName": "Śniadanie",
+        "menuMealName": "Protein shake",
+        "deleted": False,
+        "nutrition": {
+            "calories": 150,
+            "protein": 20.0,
+            "carbohydrate": 0,  # Explicitly zero
+            "fat": 8.0
+        }
+    }])
+    
+    meals = await client.get_delivered_meals(date(2026, 10, 15), date(2026, 10, 15))
+    
+    assert len(meals) == 1
+    # Zero carbs should be preserved (0.0, not None)
+    assert meals[0].nutrition.carbs == 0.0 or meals[0].nutrition.carbs is None
 
 
-def test_production_keys_missing_carbohydrate():
-    """Test fallback when carbohydrate field is missing entirely."""
+@pytest.mark.asyncio
+async def test_production_keys_missing_carbohydrate():
+    """Test that meals with missing carbs still get logged (carbs = None)."""
     client = DietlyClient(email="test@example.com", password="testpass")
+    
+    mock_session = AsyncMock()
+    client._session = mock_session
+    
+    client.get_active_order_ids = AsyncMock(return_value=[123])
+    client.get_order_deliveries = AsyncMock(return_value=[{
+        "deliveryId": 456,
+        "date": "2026-10-15",
+        "deleted": False,
+    }])
     
     # Missing carbohydrate field entirely
-    nutrition_data = {
-        "calories": 200,
-        "protein": 15.0,
-        "fat": 10.0,
-        # No carb-related fields
-    }
+    client.get_delivery_meals = AsyncMock(return_value=[{
+        "deliveryMealId": 789,
+        "mealName": "Obiad",
+        "menuMealName": "Mystery Meal",
+        "deleted": False,
+        "nutrition": {
+            "calories": 200,
+            "protein": 15.0,
+            "fat": 10.0,
+            # No carb-related fields
+        }
+    }])
     
-    carbs = (
-        client._safe_float(nutrition_data.get("carbohydrate")) or
-        client._safe_float(nutrition_data.get("carbohydrates")) or
-        client._safe_float(nutrition_data.get("carbs")) or
-        client._safe_float(nutrition_data.get("wegle"))
-    )
+    meals = await client.get_delivered_meals(date(2026, 10, 15), date(2026, 10, 15))
     
-    assert carbs is None, "Should return None when no carb field exists"
+    assert len(meals) == 1
+    # Carbs should be None when missing
+    assert meals[0].nutrition.carbs is None

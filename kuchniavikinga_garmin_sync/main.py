@@ -97,7 +97,7 @@ async def main() -> int:
         # Run the bootstrap locally first to generate tokens
         
         state_bucket = get_env_var("STATE_BUCKET", required=False)
-        days_back = int(get_env_var("SYNC_DAYS_BACK", required=False) or "1")
+        days_back = int(get_env_var("SYNC_DAYS_BACK", required=False) or "3")
         dry_run = get_env_var("DRY_RUN", required=False) == "true"
         dump_raw = get_env_var("DUMP_RAW", required=False) == "true"
         

@@ -38,30 +38,53 @@ class SyncState:
             self._local_path.parent.mkdir(parents=True, exist_ok=True)
 
     def load(self) -> None:
-        """Load sync state from storage."""
+        """Load sync state from storage.
+        
+        Starts with empty state only if state object doesn't exist (NotFound).
+        Any other error (permissions, bad JSON, etc.) aborts the job.
+        """
         try:
             if self._use_gcs:
                 if self._blob.exists():
-                    content = self._blob.download_as_text()
-                    self._state = json.loads(content)
-                    logger.info(
-                        "Loaded sync state from gs://%s/%s",
-                        self.bucket_name,
-                        self.STATE_FILE,
-                    )
+                    try:
+                        content = self._blob.download_as_text()
+                        self._state = json.loads(content)
+                        logger.info(
+                            "Loaded sync state from gs://%s/%s",
+                            self.bucket_name,
+                            self.STATE_FILE,
+                        )
+                    except json.JSONDecodeError as e:
+                        logger.error("FATAL: Sync state file contains invalid JSON: %s", e)
+                        raise RuntimeError(f"Cannot parse sync state JSON: {e}") from e
+                    except Exception as e:
+                        logger.error("FATAL: Failed to load sync state from GCS: %s", e)
+                        raise RuntimeError(f"Cannot load sync state from GCS: {e}") from e
                 else:
                     logger.info("No existing sync state in GCS, starting fresh")
+                    self._state = {"synced_meals": {}}
             else:
                 if self._local_path.exists():
-                    with open(self._local_path) as f:
-                        self._state = json.load(f)
-                    logger.info("Loaded sync state from %s", self._local_path)
+                    try:
+                        with open(self._local_path) as f:
+                            self._state = json.load(f)
+                        logger.info("Loaded sync state from %s", self._local_path)
+                    except json.JSONDecodeError as e:
+                        logger.error("FATAL: Sync state file contains invalid JSON: %s", e)
+                        raise RuntimeError(f"Cannot parse sync state JSON: {e}") from e
+                    except Exception as e:
+                        logger.error("FATAL: Failed to read sync state file: %s", e)
+                        raise RuntimeError(f"Cannot read sync state file: {e}") from e
                 else:
                     logger.info("No existing sync state locally, starting fresh")
+                    self._state = {"synced_meals": {}}
 
+        except RuntimeError:
+            # Re-raise our explicit RuntimeErrors
+            raise
         except Exception as e:
-            logger.warning("Failed to load sync state: %s. Starting fresh.", e)
-            self._state = {"synced_meals": {}}
+            logger.error("FATAL: Unexpected error loading sync state: %s", e)
+            raise
 
     def save(self) -> None:
         """Save sync state to storage."""
@@ -87,10 +110,41 @@ class SyncState:
     def is_synced(self, meal: DeliveredMeal) -> bool:
         """Check if a meal has already been synced.
 
-        Uses a hash of meal key attributes to track synced meals.
+        Checks both new stable key format and old nutrition-hash format for migration.
         """
         meal_key = self._meal_key(meal)
-        return meal_key in self._state["synced_meals"]
+        
+        # Check new format first
+        if meal_key in self._state["synced_meals"]:
+            return True
+        
+        # Check for old format migration: any entry for same date + meal_name
+        # Old format: "YYYY-MM-DD:Meal Name:hash"
+        # If found, migrate it to new format
+        date_str = meal.delivery_date.isoformat()
+        meal_name = meal.meal_name
+        old_prefix = f"{date_str}:{meal_name}:"
+        
+        for old_key in list(self._state["synced_meals"].keys()):
+            # Old format has 3 parts: date:meal_name:hash
+            # Check if key starts with our prefix and has content after
+            if old_key.startswith(old_prefix) and len(old_key) > len(old_prefix):
+                # Additional check: new format has 'd' and 'm' prefixes, old doesn't
+                remaining = old_key[len(old_prefix):]
+                if not remaining.startswith("d") and not remaining.startswith("m"):
+                    # This is an old-format key for same date+meal_name
+                    logger.info(
+                        "Migrating old sync state key '%s' to new format '%s'",
+                        old_key,
+                        meal_key
+                    )
+                    # Copy the old entry to new key
+                    self._state["synced_meals"][meal_key] = self._state["synced_meals"][old_key]
+                    # Remove old key
+                    del self._state["synced_meals"][old_key]
+                    return True
+        
+        return False
 
     def mark_synced(self, meal: DeliveredMeal, garmin_log_id: int | None = None) -> None:
         """Mark a meal as synced.
@@ -111,20 +165,12 @@ class SyncState:
 
     @staticmethod
     def _meal_key(meal: DeliveredMeal) -> str:
-        """Generate a unique key for a meal.
+        """Generate a unique stable key for a meal.
 
-        Uses: delivery_date + meal_name + nutrition hash
-        This allows detecting the same meal even if dish name changes slightly.
+        Uses: delivery_date + delivery_id + meal_id
+        These are stable IDs from Vikinga API that don't change with nutrition updates.
         """
-        nutrition_str = (
-            f"{meal.nutrition.calories:.0f}:"
-            f"{meal.nutrition.protein or 0:.0f}:"
-            f"{meal.nutrition.carbs or 0:.0f}:"
-            f"{meal.nutrition.fat or 0:.0f}"
-        )
-        nutrition_hash = hashlib.sha256(nutrition_str.encode()).hexdigest()[:8]
-
-        return f"{meal.delivery_date.isoformat()}:{meal.meal_name}:{nutrition_hash}"
+        return f"{meal.delivery_date.isoformat()}:d{meal.delivery_id}:m{meal.meal_id}"
 
     def get_synced_meals_for_date(self, target_date: date) -> list[dict[str, Any]]:
         """Get all synced meals for a specific date.

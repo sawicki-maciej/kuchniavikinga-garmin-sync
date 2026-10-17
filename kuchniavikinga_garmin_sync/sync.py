@@ -143,6 +143,8 @@ class VikingaGarminSync:
                             logger.debug("Stored Garmin logId for meal: %s", log_id)
                         
                         self.state.mark_synced(meal, garmin_log_id=log_id)
+                        # Save state after each successful sync
+                        self.state.save()
                         synced_count += 1
 
                         # Rate limiting: sleep between requests
