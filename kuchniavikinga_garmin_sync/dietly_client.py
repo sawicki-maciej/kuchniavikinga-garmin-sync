@@ -398,11 +398,12 @@ class DietlyClient:
                     # Extract nutrition info
                     nutrition_data = meal.get("nutrition", {})
                     
-                    # Try multiple field names for carbohydrates (API may use different names)
+                    # Try multiple field names for carbohydrates (API uses "carbohydrate" singular)
                     carbs = (
+                        self._safe_float(nutrition_data.get("carbohydrate")) or  # Actual API field
                         self._safe_float(nutrition_data.get("carbohydrates")) or
                         self._safe_float(nutrition_data.get("carbs")) or
-                        self._safe_float(nutrition_data.get("wegle"))  # Polish for carbs
+                        self._safe_float(nutrition_data.get("wegle"))  # Polish fallback
                     )
                     
                     # Warn if carbs are missing so we can identify the correct field name
