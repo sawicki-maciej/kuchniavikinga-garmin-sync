@@ -385,7 +385,14 @@ class DietlyClient:
                     )
                     continue
 
-                delivery_id = delivery["deliveryId"]
+                delivery_id = delivery.get("deliveryId")
+                if not delivery_id:
+                    logger.warning(
+                        "Skipping delivery for %s: missing deliveryId",
+                        delivery_date
+                    )
+                    continue
+                
                 meals = await self.get_delivery_meals(delivery_id)
 
                 meal_count = 0
@@ -442,6 +449,16 @@ class DietlyClient:
                             list(nutrition_data.keys())
                         )
                     
+                    # Check for meal ID - required for stable key generation
+                    meal_id = meal.get("deliveryMealId")
+                    if not meal_id:
+                        logger.warning(
+                            "Skipping meal %s - %s: missing deliveryMealId",
+                            meal.get("mealName", "Unknown"),
+                            meal.get("menuMealName", "Unknown"),
+                        )
+                        continue
+                    
                     delivered_meal = DeliveredMeal(
                         delivery_date=delivery_date,
                         meal_name=meal.get("mealName", "Unknown"),
@@ -453,7 +470,7 @@ class DietlyClient:
                             fat=self._safe_float(nutrition_data.get("fat")),
                         ),
                         delivery_id=delivery_id,
-                        meal_id=meal.get("deliveryMealId", 0),
+                        meal_id=meal_id,
                     )
                     delivered_meals.append(delivered_meal)
                     meal_count += 1

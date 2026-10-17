@@ -3,13 +3,11 @@ FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
 WORKDIR /app
 
-# Copy dependency files
-COPY pyproject.toml ./
-COPY README.md ./
+# Copy requirements file
+COPY requirements.txt ./
 
 # Install dependencies using uv
-# Use --frozen to ensure reproducible builds
-RUN uv pip install --system --no-cache .
+RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy application code
 COPY kuchniavikinga_garmin_sync/ ./kuchniavikinga_garmin_sync/

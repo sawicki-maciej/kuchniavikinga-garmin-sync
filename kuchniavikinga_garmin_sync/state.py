@@ -27,6 +27,7 @@ class SyncState:
         """
         self.bucket_name = bucket_name
         self._state: dict[str, Any] = {"synced_meals": {}}
+        self._state_changed = False  # Track if state was modified (e.g., by migration)
         self._use_gcs = bucket_name is not None
 
         if self._use_gcs:
@@ -102,6 +103,9 @@ class SyncState:
                 with open(self._local_path, "w") as f:
                     f.write(content)
                 logger.info("Saved sync state to %s", self._local_path)
+            
+            # Reset changed flag after successful save
+            self._state_changed = False
 
         except Exception as e:
             logger.error("Failed to save sync state: %s", e)
@@ -112,37 +116,50 @@ class SyncState:
 
         Checks both new stable key format and old nutrition-hash format for migration.
         """
+        import re
+        
         meal_key = self._meal_key(meal)
         
         # Check new format first
         if meal_key in self._state["synced_meals"]:
             return True
         
-        # Check for old format migration: any entry for same date + meal_name
-        # Old format: "YYYY-MM-DD:Meal Name:hash"
-        # If found, migrate it to new format
+        # Define format patterns
+        # New format: YYYY-MM-DD:dDELIVERY_ID:mMEAL_ID (e.g., "2026-10-17:d12345:m67890")
+        new_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}:d\d+:m\d+$")
+        # Old format: YYYY-MM-DD:Meal Name:HASH (e.g., "2026-10-17:Obiad:d41f09ab")
+        # Hash is 8-char hex that can start with any hex digit including 'd' or 'm'
+        old_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}:.+:[0-9a-f]{8}$")
+        
+        # Check for old format migration: exact match on date + meal_name
         date_str = meal.delivery_date.isoformat()
         meal_name = meal.meal_name
-        old_prefix = f"{date_str}:{meal_name}:"
         
         for old_key in list(self._state["synced_meals"].keys()):
-            # Old format has 3 parts: date:meal_name:hash
-            # Check if key starts with our prefix and has content after
-            if old_key.startswith(old_prefix) and len(old_key) > len(old_prefix):
-                # Additional check: new format has 'd' and 'm' prefixes, old doesn't
-                remaining = old_key[len(old_prefix):]
-                if not remaining.startswith("d") and not remaining.startswith("m"):
-                    # This is an old-format key for same date+meal_name
-                    logger.info(
-                        "Migrating old sync state key '%s' to new format '%s'",
-                        old_key,
-                        meal_key
-                    )
-                    # Copy the old entry to new key
-                    self._state["synced_meals"][meal_key] = self._state["synced_meals"][old_key]
-                    # Remove old key
-                    del self._state["synced_meals"][old_key]
-                    return True
+            # Skip if this is already new format
+            if new_pattern.match(old_key):
+                continue
+            
+            # Check if this is old format for same date + meal_name
+            if old_pattern.match(old_key):
+                # Parse old key: date:meal_name:hash
+                parts = old_key.split(":", 2)  # Split into at most 3 parts
+                if len(parts) == 3:
+                    old_date, old_meal_name, old_hash = parts
+                    
+                    # Match by exact date and meal_name
+                    if old_date == date_str and old_meal_name == meal_name:
+                        logger.info(
+                            "Migrating old sync state key '%s' to new format '%s'",
+                            old_key,
+                            meal_key
+                        )
+                        # Copy the old entry to new key
+                        self._state["synced_meals"][meal_key] = self._state["synced_meals"][old_key]
+                        # Remove old key
+                        del self._state["synced_meals"][old_key]
+                        self._state_changed = True
+                        return True
         
         return False
 
@@ -162,6 +179,11 @@ class SyncState:
         }
         if garmin_log_id is not None:
             self._state["synced_meals"][meal_key]["garmin_log_id"] = garmin_log_id
+        self._state_changed = True
+    
+    def has_changes(self) -> bool:
+        """Check if state has been modified since last save."""
+        return self._state_changed
 
     @staticmethod
     def _meal_key(meal: DeliveredMeal) -> str:
