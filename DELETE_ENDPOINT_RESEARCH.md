@@ -9,7 +9,10 @@ Searched GitHub for:
    - `cyberjunky/python-garminconnect` - No delete nutrition method
    - `matin/garth` - No delete nutrition method
    - `jaroslawhartman/withings-sync` - No nutrition deletion
-   - Home Assistant `ha-garmin` - No delete nutrition method (only add)
+   - Home Assistant `ha-garmin` v0.1.52 - **NO delete nutrition method**
+     - Has `_delete_request()` but only used for workouts
+     - Nutrition constants: `NUTRITION_QUICK_ADD_URL`, `NUTRITION_LOGS_URL`, `NUTRITION_MEALS_URL`
+     - Only implements nutrition GET and PUT (quickAdd)
 
 ## Garmin Connect Web App (Browser DevTools)
 
