@@ -136,7 +136,11 @@ class VikingaGarminSync:
                         result = await garmin.log_meal(meal)
                         
                         # Extract Garmin log ID from result if available
-                        log_id = result.get("nutritionLogId") or result.get("logId")
+                        # logId is a 32-char hex string like '1ecbb709157543948c25eafa2c74edc7'
+                        log_id = result.get("logId") or result.get("nutritionLogId")
+                        
+                        if log_id:
+                            logger.debug("Stored Garmin logId for meal: %s", log_id)
                         
                         self.state.mark_synced(meal, garmin_log_id=log_id)
                         synced_count += 1
