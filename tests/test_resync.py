@@ -35,8 +35,19 @@ async def test_resync_with_stored_ids():
         }
     }}
     
-    # Mock Garmin API responses
-    garmin_mock.list_nutrition_logs = AsyncMock(return_value=[])
+    # Mock Garmin API responses - return logs that match the state IDs
+    garmin_mock.list_nutrition_logs = AsyncMock(return_value=[
+        {
+            "name": "KV: Śniadanie - Test Breakfast",
+            "foodLogId": 12345,
+            "calories": 400
+        },
+        {
+            "name": "KV: Obiad - Test Lunch",
+            "foodLogId": 67890,
+            "calories": 600
+        }
+    ])
     garmin_mock.delete_nutrition_log = AsyncMock(return_value=True)
     garmin_mock.log_meal = AsyncMock(return_value={"nutritionLogId": 99999})
     
@@ -98,7 +109,14 @@ async def test_resync_dry_run():
         }
     }}
     
-    garmin_mock.list_nutrition_logs = AsyncMock(return_value=[])
+    # Mock Garmin API to return matching log
+    garmin_mock.list_nutrition_logs = AsyncMock(return_value=[
+        {
+            "name": "KV: Śniadanie - Test Meal",
+            "foodLogId": 12345,
+            "calories": 400
+        }
+    ])
     
     fresh_meals = [
         DeliveredMeal(
@@ -142,17 +160,17 @@ async def test_resync_finds_garmin_entries_without_state():
     garmin_mock.list_nutrition_logs = AsyncMock(return_value=[
         {
             "name": "KV: Śniadanie - Test Meal",
-            "nutritionLogId": 11111,
+            "foodLogId": 11111,
             "calories": 400
         },
         {
             "name": "Random App Entry",
-            "nutritionLogId": 22222,
+            "foodLogId": 22222,
             "calories": 300
         },
         {
             "name": "KV: Obiad - Another Meal",
-            "nutritionLogId": 33333,
+            "foodLogId": 33333,
             "calories": 600
         }
     ])
