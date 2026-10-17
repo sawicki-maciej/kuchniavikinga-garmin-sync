@@ -58,14 +58,35 @@ Deployed on GCP Cloud Run Job in project `maciej-prod`, region `europe-west1`, f
 - **Cloud Scheduler**: `kuchniavikinga-garmin-sync-daily` (07:00 Europe/Warsaw)
 - **GCS Bucket**: `maciej-prod-kuchniavikinga-garmin-sync-state` (uniform access, private)
 - **Secrets**:
-  - `vikinga-email` - Kuchnia Vikinga / Dietly account email
-  - `vikinga-password` - Kuchnia Vikinga / Dietly account password
-  - `garmin-email` - Garmin Connect account email
-  - `garmin-password` - Garmin Connect account password
+  - `kuchniavikinga-garmin-sync-vikinga-email` - Kuchnia Vikinga / Dietly account email
+  - `kuchniavikinga-garmin-sync-vikinga-password` - Kuchnia Vikinga / Dietly account password
+  - `kuchniavikinga-garmin-sync-garmin-tokens` - Garmin OAuth tokens (bootstrapped once, auto-refreshed)
+  - ~~`kuchniavikinga-garmin-sync-garmin-email`~~ (not used - token-based auth only)
+  - ~~`kuchniavikinga-garmin-sync-garmin-password`~~ (not used - token-based auth only)
 - **Service Account**: `kuchniavikinga-garmin-sync@maciej-prod.iam.gserviceaccount.com`
   - `roles/storage.objectUser` on state bucket
   - `roles/secretmanager.secretAccessor` on secrets
-  - `roles/run.invoker` on the job
+  - `roles/secretmanager.secretVersionAdder` on garmin-tokens (for auto-refresh)
+  - `roles/run.invoker` on the job (not project-wide)
+
+### One-Time Garmin Token Bootstrap
+
+Before the first deployment, you must bootstrap Garmin OAuth tokens on a Mac (Garmin's auth flow requires a real browser environment):
+
+```bash
+# Install dependencies locally
+uv pip install -e .
+
+# Run the Garmin login flow (opens browser)
+./contrib/cloudrun/setup.sh garmin-login
+
+# This will:
+# 1. Launch browser for Garmin OAuth
+# 2. Save tokens to ~/.garminconnect/
+# 3. Upload tokens to Secret Manager (kuchniavikinga-garmin-sync-garmin-tokens)
+```
+
+After this, the Cloud Run job will auto-refresh the tokens on each run.
 
 ### Setup Script
 
@@ -77,11 +98,13 @@ Environment variables (set via Cloud Run Job config):
 
 - `VIKINGA_EMAIL` - Injected from Secret Manager
 - `VIKINGA_PASSWORD` - Injected from Secret Manager
-- `GARMIN_EMAIL` - Injected from Secret Manager
-- `GARMIN_PASSWORD` - Injected from Secret Manager
 - `STATE_BUCKET` - GCS bucket name (e.g. `maciej-prod-kuchniavikinga-garmin-sync-state`)
-- `SYNC_DAYS_BACK` - How many days back to sync (default: 1)
+- `SYNC_DAYS_BACK` - How many days back to sync (default: 3)
+- `SYNC_DATE` - Sync a specific date instead of lookback window (format: `YYYY-MM-DD`)
+- `RESYNC_DATE` - **BROKEN**: Delete and re-log meals for a specific date (format: `YYYY-MM-DD`)
+  - Note: The Garmin DELETE endpoint returns 404, so resync mode is currently not functional
 - `DRY_RUN` - If `true`, log actions without writing to Garmin (default: `false`)
+- `DUMP_RAW` - If `true`, dump raw API responses to logs (default: `false`)
 - `LOG_LEVEL` - Logging level (default: `INFO`)
 
 ## Running Locally
@@ -89,20 +112,19 @@ Environment variables (set via Cloud Run Job config):
 ### Prerequisites
 
 - Python 3.11+
+- [uv](https://github.com/astral-sh/uv) (fast Python package installer)
 - Docker (for containerized testing)
 - GCP credentials with access to the state bucket
 
 ### Local Development
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies with uv
+uv pip install -e .
 
 # Set environment variables
 export VIKINGA_EMAIL="your-email@example.com"
 export VIKINGA_PASSWORD="your-password"
-export GARMIN_EMAIL="your-garmin-email@example.com"
-export GARMIN_PASSWORD="your-garmin-password"
 export STATE_BUCKET="local-test-bucket"  # or use a test GCS bucket
 export DRY_RUN="true"  # recommended for testing
 export LOG_LEVEL="DEBUG"
@@ -110,6 +132,8 @@ export LOG_LEVEL="DEBUG"
 # Run the sync
 python -m kuchniavikinga_garmin_sync.main
 ```
+
+Note: Garmin authentication uses OAuth tokens stored in Secret Manager. For local dev, first run `./contrib/cloudrun/setup.sh garmin-login` to bootstrap tokens.
 
 ### Docker
 
@@ -149,7 +173,7 @@ docker run --env-file .env.local kuchniavikinga-garmin-sync
 ### Sync Window
 - Only syncs "delivered" meals (typically yesterday's meals)
 - Does not sync future planned meals
-- Default 1-day lookback; increase `SYNC_DAYS_BACK` for backfill but beware of duplicate prevention complexity
+- Default 3-day lookback; safe thanks to stable meal key tracking (date + Vikinga delivery_id + meal_id)
 
 ## Monitoring
 

@@ -323,16 +323,16 @@ class DietlyClient:
         if self.dump_raw:
             self._dump_json(f"delivery_{delivery_id}_meals", data)
         
-        # Parse defensively - check multiple possible keys
-        meals = (
-            data.get("deliveryMenuMeal") or
-            data.get("meals") or
-            data.get("deliveryMeals") or
-            []
-        )
-        
-        if not meals and isinstance(data, list):
+        # Parse defensively - handle list-shaped responses and check multiple possible keys
+        if isinstance(data, list):
             meals = data
+        else:
+            meals = (
+                data.get("deliveryMenuMeal") or
+                data.get("meals") or
+                data.get("deliveryMeals") or
+                []
+            )
             
         logger.debug("Delivery %d has %d meals", delivery_id, len(meals))
         return meals
@@ -385,7 +385,14 @@ class DietlyClient:
                     )
                     continue
 
-                delivery_id = delivery["deliveryId"]
+                delivery_id = delivery.get("deliveryId")
+                if not delivery_id:
+                    logger.warning(
+                        "Skipping delivery for %s: missing deliveryId",
+                        delivery_date
+                    )
+                    continue
+                
                 meals = await self.get_delivery_meals(delivery_id)
 
                 meal_count = 0
@@ -395,8 +402,36 @@ class DietlyClient:
                         logger.debug("Skipping deleted meal %s", meal.get("deliveryMealId"))
                         continue
                     
-                    # Extract nutrition info
-                    nutrition_data = meal.get("nutrition", {})
+                    # Extract nutrition info - handle nutrition: null
+                    nutrition_data = meal.get("nutrition")
+                    if not isinstance(nutrition_data, dict):
+                        logger.warning(
+                            "Skipping meal %s - %s: nutrition data is null or invalid",
+                            meal.get("mealName", "Unknown"),
+                            meal.get("menuMealName", "Unknown"),
+                        )
+                        continue
+                    
+                    # Get calories - skip meal if missing
+                    calories_raw = nutrition_data.get("calories")
+                    if calories_raw is None or calories_raw == 0:
+                        logger.warning(
+                            "Skipping meal %s - %s: calories are missing or zero",
+                            meal.get("mealName", "Unknown"),
+                            meal.get("menuMealName", "Unknown"),
+                        )
+                        continue
+                    
+                    try:
+                        calories = float(calories_raw)
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "Skipping meal %s - %s: invalid calories value '%s'",
+                            meal.get("mealName", "Unknown"),
+                            meal.get("menuMealName", "Unknown"),
+                            calories_raw,
+                        )
+                        continue
                     
                     # Try multiple field names for carbohydrates (API uses "carbohydrate" singular)
                     carbs = (
@@ -414,18 +449,28 @@ class DietlyClient:
                             list(nutrition_data.keys())
                         )
                     
+                    # Check for meal ID - required for stable key generation
+                    meal_id = meal.get("deliveryMealId")
+                    if not meal_id:
+                        logger.warning(
+                            "Skipping meal %s - %s: missing deliveryMealId",
+                            meal.get("mealName", "Unknown"),
+                            meal.get("menuMealName", "Unknown"),
+                        )
+                        continue
+                    
                     delivered_meal = DeliveredMeal(
                         delivery_date=delivery_date,
                         meal_name=meal.get("mealName", "Unknown"),
                         dish_name=meal.get("menuMealName", "Unknown dish"),
                         nutrition=NutritionInfo(
-                            calories=float(nutrition_data.get("calories", 0) or 0),
+                            calories=calories,
                             protein=self._safe_float(nutrition_data.get("protein")),
                             carbs=carbs,
                             fat=self._safe_float(nutrition_data.get("fat")),
                         ),
                         delivery_id=delivery_id,
-                        meal_id=meal.get("deliveryMealId", 0),
+                        meal_id=meal_id,
                     )
                     delivered_meals.append(delivered_meal)
                     meal_count += 1

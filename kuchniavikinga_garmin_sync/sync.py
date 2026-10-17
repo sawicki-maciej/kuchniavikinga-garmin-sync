@@ -143,6 +143,8 @@ class VikingaGarminSync:
                             logger.debug("Stored Garmin logId for meal: %s", log_id)
                         
                         self.state.mark_synced(meal, garmin_log_id=log_id)
+                        # Save state after each successful sync
+                        self.state.save()
                         synced_count += 1
 
                         # Rate limiting: sleep between requests
@@ -158,9 +160,11 @@ class VikingaGarminSync:
                         )
                         error_count += 1
 
-        # Save updated state (even on partial success)
-        if synced_count > 0 and not self.dry_run:
+        # Save updated state if we synced meals or state changed (e.g., from migration)
+        if not self.dry_run and (synced_count > 0 or self.state.has_changes()):
             self.state.save()
+            if synced_count == 0 and self.state.has_changes():
+                logger.info("Saved state changes (e.g., from migration)")
 
         logger.info(
             "Sync completed: %d meals synced, %d errors", synced_count, error_count
