@@ -2,7 +2,7 @@
 
 import logging
 import tempfile
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from google.cloud import secretmanager
@@ -209,6 +209,62 @@ class GarminConnectClient:
 
         except Exception as e:
             logger.error("Failed to log meal %s: %s", name, e)
+            raise
+    
+    async def list_nutrition_logs(self, target_date: date) -> list[dict]:
+        """List nutrition log entries for a specific date.
+        
+        Args:
+            target_date: The date to query
+            
+        Returns:
+            List of nutrition log entries
+        """
+        try:
+            data = await self._client.get_nutrition_log(target_date)
+            
+            # The API returns a dict with various keys; log entries are typically in a list
+            # Extract all log entries (check common keys)
+            logs = []
+            if isinstance(data, dict):
+                # Try common key names for nutrition logs
+                for key in ['nutritionLogs', 'logs', 'foodLogs', 'items', 'meals']:
+                    if key in data and isinstance(data[key], list):
+                        logs.extend(data[key])
+                
+                # If no list found, log the structure for debugging
+                if not logs:
+                    logger.debug("Nutrition log structure for %s: %s", target_date, list(data.keys()))
+            
+            return logs
+        except Exception as e:
+            logger.error("Failed to list nutrition logs for %s: %s", target_date, e)
+            raise
+    
+    async def delete_nutrition_log(self, log_id: int) -> bool:
+        """Delete a nutrition log entry by ID.
+        
+        Args:
+            log_id: The Garmin nutrition log ID to delete
+            
+        Returns:
+            True if deletion succeeded
+        """
+        try:
+            # Use the authenticated client to make a DELETE request
+            # The endpoint pattern is typically /nutritionservice/v3/nutrition-logs/{logId}
+            from ha_garmin.client import NUTRITION_LOGS_URL
+            
+            # Extract the base URL and make a DELETE request
+            url = f"{NUTRITION_LOGS_URL}/{log_id}"
+            
+            # Access the internal _request method
+            await self._client._request("DELETE", url)
+            logger.info("Deleted Garmin nutrition log %s", log_id)
+            return True
+            
+        except Exception as e:
+            logger.error("Failed to delete nutrition log %s: %s", log_id, e)
             raise
 
     @staticmethod

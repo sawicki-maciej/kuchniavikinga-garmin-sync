@@ -92,8 +92,13 @@ class SyncState:
         meal_key = self._meal_key(meal)
         return meal_key in self._state["synced_meals"]
 
-    def mark_synced(self, meal: DeliveredMeal) -> None:
-        """Mark a meal as synced."""
+    def mark_synced(self, meal: DeliveredMeal, garmin_log_id: int | None = None) -> None:
+        """Mark a meal as synced.
+        
+        Args:
+            meal: The meal that was synced
+            garmin_log_id: Optional Garmin nutrition log ID for this entry
+        """
         meal_key = self._meal_key(meal)
         self._state["synced_meals"][meal_key] = {
             "delivery_date": meal.delivery_date.isoformat(),
@@ -101,6 +106,8 @@ class SyncState:
             "dish_name": meal.dish_name,
             "synced_at": date.today().isoformat(),
         }
+        if garmin_log_id is not None:
+            self._state["synced_meals"][meal_key]["garmin_log_id"] = garmin_log_id
 
     @staticmethod
     def _meal_key(meal: DeliveredMeal) -> str:
@@ -119,6 +126,35 @@ class SyncState:
 
         return f"{meal.delivery_date.isoformat()}:{meal.meal_name}:{nutrition_hash}"
 
+    def get_synced_meals_for_date(self, target_date: date) -> list[dict[str, Any]]:
+        """Get all synced meals for a specific date.
+        
+        Args:
+            target_date: The date to query
+            
+        Returns:
+            List of synced meal records with their keys
+        """
+        date_str = target_date.isoformat()
+        results = []
+        for meal_key, meal_data in self._state["synced_meals"].items():
+            if meal_data.get("delivery_date") == date_str:
+                results.append({
+                    "key": meal_key,
+                    "data": meal_data
+                })
+        return results
+    
+    def clear_meal(self, meal_key: str) -> None:
+        """Remove a meal from sync state.
+        
+        Args:
+            meal_key: The meal key to remove
+        """
+        if meal_key in self._state["synced_meals"]:
+            del self._state["synced_meals"][meal_key]
+            logger.info("Cleared meal from sync state: %s", meal_key)
+    
     def get_stats(self) -> dict[str, Any]:
         """Get sync statistics."""
         synced_count = len(self._state["synced_meals"])

@@ -133,8 +133,12 @@ class VikingaGarminSync:
             async with GarminConnectClient() as garmin:
                 for meal in new_meals:
                     try:
-                        await garmin.log_meal(meal)
-                        self.state.mark_synced(meal)
+                        result = await garmin.log_meal(meal)
+                        
+                        # Extract Garmin log ID from result if available
+                        log_id = result.get("nutritionLogId") or result.get("logId")
+                        
+                        self.state.mark_synced(meal, garmin_log_id=log_id)
                         synced_count += 1
 
                         # Rate limiting: sleep between requests
